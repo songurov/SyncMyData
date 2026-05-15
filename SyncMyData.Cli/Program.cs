@@ -517,8 +517,8 @@ internal sealed class RepoSyncCli
 
         var filtered = ApplyAnalyzeFilters(rows, options);
         var ordered = filtered
-            .OrderByDescending(ComputeBranchScore)
-            .ThenByDescending(x => x.AgeDays ?? -1)
+            .OrderByDescending(x => x.AgeDays ?? -1)
+            .ThenByDescending(ComputeBranchScore)
             .ThenBy(x => x.Branch, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
