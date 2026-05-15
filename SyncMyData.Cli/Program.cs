@@ -462,7 +462,8 @@ internal sealed class RepoSyncCli
         foreach (var branch in localBranches)
         {
             var states = new List<string>();
-            states.Add(GetAgeState(branch.LastCommitDate));
+            var ageState = GetAgeState(branch.LastCommitDate);
+            states.Add(ageState);
             if (IsProtectedBranch(branch.Name))
             {
                 states.Add("PROTECTED");
@@ -489,12 +490,15 @@ internal sealed class RepoSyncCli
             }
 
             var lastAuthor = await GetLastAuthorAsync(repositoryPath, branch.Name);
+            var ageDays = GetAgeInDays(branch.LastCommitDate);
             rows.Add(new BranchAnalysisRow(
                 branch.Name,
                 string.Join(",", states.Distinct(StringComparer.Ordinal)),
                 ToRelativeAge(branch.LastCommitDate),
-                BuildRecommendation(states),
-                lastAuthor));
+                BuildRecommendation(states, ageDays),
+                lastAuthor,
+                ageDays,
+                "LOCAL"));
         }
 
         foreach (var remote in remoteBranches.Where(x => x != "origin/HEAD" && x != "origin"))
@@ -507,11 +511,13 @@ internal sealed class RepoSyncCli
                     "REMOTE_ONLY",
                     "-",
                     "Review and optionally checkout locally",
-                    "-"));
+                    "-",
+                    null,
+                    "REMOTE_ONLY"));
             }
         }
 
-        PrintBranchAnalysisTable(rows.OrderBy(x => x.Branch, StringComparer.OrdinalIgnoreCase).ToList());
+        PrintBranchAnalysisReadable(rows.OrderBy(x => x.Branch, StringComparer.OrdinalIgnoreCase).ToList());
     }
 
     private static List<LocalBranchRef> ParseLocalBranchRefs(string output)
@@ -575,16 +581,30 @@ internal sealed class RepoSyncCli
         || branchName.StartsWith("release/", StringComparison.Ordinal)
         || branchName.StartsWith("hotfix/", StringComparison.Ordinal);
 
-    private static string BuildRecommendation(List<string> states)
+    private static string BuildRecommendation(List<string> states, int? ageDays)
     {
         if (states.Contains("PROTECTED", StringComparer.Ordinal)) return "Keep (protected)";
         if (states.Contains("DIVERGED", StringComparer.Ordinal)) return "Manual review required";
-        if (states.Contains("MERGED_IN_DEVELOP", StringComparer.Ordinal) || states.Contains("MERGED_IN_MAIN", StringComparer.Ordinal)) return "Delete local + remote";
+        if ((states.Contains("MERGED_IN_DEVELOP", StringComparer.Ordinal) || states.Contains("MERGED_IN_MAIN", StringComparer.Ordinal)) && ageDays is >= 30)
+        {
+            return "Possible remove (merged + 30d+ old)";
+        }
+        if (states.Contains("MERGED_IN_DEVELOP", StringComparer.Ordinal) || states.Contains("MERGED_IN_MAIN", StringComparer.Ordinal)) return "Keep/Review (recently merged)";
         if (states.Contains("GONE_REMOTE", StringComparer.Ordinal)) return "Delete local";
         if (states.Contains("NO_UPSTREAM", StringComparer.Ordinal)) return "Publish or delete";
         if (states.Contains("CLEANUP_CANDIDATE", StringComparer.Ordinal)) return "Cleanup candidate";
         if (states.Contains("STALE", StringComparer.Ordinal) || states.Contains("OLD", StringComparer.Ordinal)) return "Review";
         return "Keep";
+    }
+
+    private static int? GetAgeInDays(DateTimeOffset lastCommitDate)
+    {
+        if (lastCommitDate == DateTimeOffset.MinValue)
+        {
+            return null;
+        }
+
+        return (int)Math.Max(0, (DateTimeOffset.UtcNow - lastCommitDate.ToUniversalTime()).TotalDays);
     }
 
     private async Task<string> GetMergedStateAsync(string repositoryPath, string branchName)
@@ -615,13 +635,18 @@ internal sealed class RepoSyncCli
         return result.ExitCode == 0 ? result.Output.Trim() : "-";
     }
 
-    private static void PrintBranchAnalysisTable(List<BranchAnalysisRow> rows)
+    private static void PrintBranchAnalysisReadable(List<BranchAnalysisRow> rows)
     {
-        Console.WriteLine("Branch | State | Last Commit | Recommendation | Last Author");
-        Console.WriteLine("--- | --- | --- | --- | ---");
+        Console.WriteLine($"Branches: {rows.Count}");
         foreach (var row in rows)
         {
-            Console.WriteLine($"{row.Branch} | {row.State} | {row.LastCommit} | {row.Recommendation} | {row.LastAuthor}");
+            Console.WriteLine();
+            Console.WriteLine($"Branch: {row.Branch}");
+            Console.WriteLine($"  Location: {row.Location}");
+            Console.WriteLine($"  Last modified: {row.LastCommit}");
+            Console.WriteLine($"  Last author: {row.LastAuthor}");
+            Console.WriteLine($"  State: {row.State}");
+            Console.WriteLine($"  Recommendation: {row.Recommendation}");
         }
     }
 
@@ -811,6 +836,14 @@ internal sealed class RepoSyncCli
                         return SyncBranchesOptions.Invalid("Missing value for --repo");
                     }
                     repositoryPath = args[++i];
+                    break;
+                case "--root":
+                    // Allowed for compatibility with global alias wrappers that inject --root.
+                    if (i + 1 >= args.Length)
+                    {
+                        return SyncBranchesOptions.Invalid("Missing value for --root");
+                    }
+                    i++;
                     break;
                 default:
                     return SyncBranchesOptions.Invalid($"Unknown option: {args[i]}");
@@ -1029,7 +1062,7 @@ internal sealed class RepoSyncCli
     }
 
     private readonly record struct LocalBranchRef(string Name, string Upstream, string TrackShort, DateTimeOffset LastCommitDate);
-    private readonly record struct BranchAnalysisRow(string Branch, string State, string LastCommit, string Recommendation, string LastAuthor);
+    private readonly record struct BranchAnalysisRow(string Branch, string State, string LastCommit, string Recommendation, string LastAuthor, int? AgeDays, string Location);
 
     private readonly record struct CurrentBranchInfo(string Branch, string Upstream, bool IsValid)
     {
