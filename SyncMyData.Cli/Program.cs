@@ -43,11 +43,28 @@ internal sealed class RepoSyncCli
         {
             Console.WriteLine();
             Console.WriteLine($"[{repository}]");
+            var branchInfo = await GetCurrentBranchInfoAsync(repository);
+            if (!branchInfo.IsValid)
+            {
+                Console.WriteLine("  current branch: unknown");
+            }
+            else
+            {
+                Console.WriteLine($"  current branch: {branchInfo.Branch}");
+                Console.WriteLine($"  upstream: {branchInfo.Upstream}");
+            }
 
             if (options.DryRun)
             {
                 Console.WriteLine("  DRY RUN: git fetch --all --prune");
-                Console.WriteLine("  DRY RUN: git pull --ff-only");
+                if (branchInfo.IsValid)
+                {
+                    Console.WriteLine($"  DRY RUN: git pull --ff-only ({branchInfo.Branch} <- {branchInfo.Upstream})");
+                }
+                else
+                {
+                    Console.WriteLine("  DRY RUN: git pull --ff-only");
+                }
                 continue;
             }
 
@@ -275,6 +292,28 @@ internal sealed class RepoSyncCli
             .ToList();
     }
 
+    private static async Task<CurrentBranchInfo> GetCurrentBranchInfoAsync(string repositoryPath)
+    {
+        var branchResult = await RunGitAsync(repositoryPath, "rev-parse --abbrev-ref HEAD", printOutput: false);
+        if (branchResult.ExitCode != 0)
+        {
+            return CurrentBranchInfo.Invalid();
+        }
+
+        var branch = branchResult.Output.Trim();
+        if (string.IsNullOrWhiteSpace(branch) || branch == "HEAD")
+        {
+            return CurrentBranchInfo.Invalid();
+        }
+
+        var upstreamResult = await RunGitAsync(repositoryPath, "rev-parse --abbrev-ref --symbolic-full-name @{u}", printOutput: false);
+        var upstream = upstreamResult.ExitCode == 0
+            ? upstreamResult.Output.Trim()
+            : "no-upstream";
+
+        return CurrentBranchInfo.Valid(branch, upstream);
+    }
+
     private static int PrintSummary(List<string> failures, string successMessage, string failureHeader)
     {
         Console.WriteLine();
@@ -497,5 +536,14 @@ internal sealed class RepoSyncCli
     private readonly record struct BranchState(string Name, string Upstream, string TrackShort)
     {
         public bool HasUpstream => !string.IsNullOrWhiteSpace(Upstream);
+    }
+
+    private readonly record struct CurrentBranchInfo(string Branch, string Upstream, bool IsValid)
+    {
+        public static CurrentBranchInfo Valid(string branch, string upstream) =>
+            new(branch, string.IsNullOrWhiteSpace(upstream) ? "no-upstream" : upstream, true);
+
+        public static CurrentBranchInfo Invalid() =>
+            new(string.Empty, string.Empty, false);
     }
 }
