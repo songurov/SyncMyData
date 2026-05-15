@@ -26,6 +26,7 @@ internal sealed class RepoSyncCli
         {
             "sync" => await RunSyncAsync(commandArgs),
             "scan" => await RunScanAsync(commandArgs),
+            "analyze-branches" => await RunAnalyzeBranchesAsync(commandArgs),
             "sync-project" => await RunSyncProjectAsync(commandArgs),
             "sync-branches" => await RunSyncBranchesAsync(commandArgs),
             "setup-alias" => await RunSetupAliasAsync(commandArgs),
@@ -123,6 +124,39 @@ internal sealed class RepoSyncCli
             {
                 Console.WriteLine($"    {branch.Name} ({branch.TrackShort})");
             }
+        }
+
+        return 0;
+    }
+
+    private async Task<int> RunAnalyzeBranchesAsync(string[] args)
+    {
+        if (args.Contains("--repo", StringComparer.Ordinal))
+        {
+            var options = ParseSyncBranchesOptions(args);
+            if (!options.IsValid)
+            {
+                Console.Error.WriteLine(options.Error);
+                return 1;
+            }
+
+            await AnalyzeRepositoryAsync(options.RepositoryPath, options.DryRun);
+            return 0;
+        }
+
+        var rootedOptions = ParseRootedOptions(args);
+        if (!rootedOptions.IsValid)
+        {
+            Console.Error.WriteLine(rootedOptions.Error);
+            return 1;
+        }
+
+        var repositories = FindGitRepositories(rootedOptions.RootDirectory).ToList();
+        Console.WriteLine($"Found {repositories.Count} repositories in {rootedOptions.RootDirectory}");
+        foreach (var repository in repositories)
+        {
+            Console.WriteLine();
+            await AnalyzeRepositoryAsync(repository, rootedOptions.DryRun);
         }
 
         return 0;
@@ -409,6 +443,188 @@ internal sealed class RepoSyncCli
         return new RepositoryScanResult(repository, true, remoteChanged, foundMessage);
     }
 
+    private async Task AnalyzeRepositoryAsync(string repositoryPath, bool dryRun)
+    {
+        Console.WriteLine($"Repository: {repositoryPath}");
+        if (!dryRun)
+        {
+            await RunGitAsync(repositoryPath, "fetch --all --prune", printOutput: false);
+        }
+
+        var localRaw = await RunGitAsync(repositoryPath, "for-each-ref --format=%(refname:short)|%(upstream:short)|%(upstream:trackshort)|%(committerdate:iso8601) refs/heads", printOutput: false);
+        var remoteRaw = await RunGitAsync(repositoryPath, "for-each-ref --format=%(refname:short)|%(committerdate:iso8601) refs/remotes/origin", printOutput: false);
+
+        var localBranches = ParseLocalBranchRefs(localRaw.Output);
+        var remoteBranches = ParseRemoteBranchRefs(remoteRaw.Output);
+        var localNames = localBranches.Select(x => x.Name).ToHashSet(StringComparer.Ordinal);
+
+        var rows = new List<BranchAnalysisRow>();
+        foreach (var branch in localBranches)
+        {
+            var states = new List<string>();
+            states.Add(GetAgeState(branch.LastCommitDate));
+            if (IsProtectedBranch(branch.Name))
+            {
+                states.Add("PROTECTED");
+            }
+
+            if (string.IsNullOrWhiteSpace(branch.Upstream))
+            {
+                states.Add("NO_UPSTREAM");
+            }
+            else if (branch.TrackShort.Contains("gone", StringComparison.OrdinalIgnoreCase))
+            {
+                states.Add("GONE_REMOTE");
+            }
+
+            if (branch.TrackShort.Contains("<>", StringComparison.Ordinal))
+            {
+                states.Add("DIVERGED");
+            }
+
+            var mergedState = await GetMergedStateAsync(repositoryPath, branch.Name);
+            if (!string.IsNullOrWhiteSpace(mergedState))
+            {
+                states.Add(mergedState);
+            }
+
+            var lastAuthor = await GetLastAuthorAsync(repositoryPath, branch.Name);
+            rows.Add(new BranchAnalysisRow(
+                branch.Name,
+                string.Join(",", states.Distinct(StringComparer.Ordinal)),
+                ToRelativeAge(branch.LastCommitDate),
+                BuildRecommendation(states),
+                lastAuthor));
+        }
+
+        foreach (var remote in remoteBranches.Where(x => x != "origin/HEAD" && x != "origin"))
+        {
+            var shortRemote = remote.StartsWith("origin/", StringComparison.Ordinal) ? remote[7..] : remote;
+            if (!localNames.Contains(shortRemote))
+            {
+                rows.Add(new BranchAnalysisRow(
+                    remote,
+                    "REMOTE_ONLY",
+                    "-",
+                    "Review and optionally checkout locally",
+                    "-"));
+            }
+        }
+
+        PrintBranchAnalysisTable(rows.OrderBy(x => x.Branch, StringComparer.OrdinalIgnoreCase).ToList());
+    }
+
+    private static List<LocalBranchRef> ParseLocalBranchRefs(string output)
+    {
+        return output
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(line =>
+            {
+                var parts = line.Split('|');
+                return new LocalBranchRef(
+                    parts.ElementAtOrDefault(0) ?? string.Empty,
+                    parts.ElementAtOrDefault(1) ?? string.Empty,
+                    parts.ElementAtOrDefault(2) ?? string.Empty,
+                    ParseDate(parts.ElementAtOrDefault(3)));
+            })
+            .Where(x => !string.IsNullOrWhiteSpace(x.Name))
+            .ToList();
+    }
+
+    private static List<string> ParseRemoteBranchRefs(string output)
+    {
+        return output
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(line => line.Split('|').FirstOrDefault() ?? string.Empty)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .ToList();
+    }
+
+    private static DateTimeOffset ParseDate(string? value)
+    {
+        return DateTimeOffset.TryParse(value, out var date) ? date : DateTimeOffset.MinValue;
+    }
+
+    private static string GetAgeState(DateTimeOffset lastCommitDate)
+    {
+        if (lastCommitDate == DateTimeOffset.MinValue)
+        {
+            return "OLD";
+        }
+
+        var days = (DateTimeOffset.UtcNow - lastCommitDate.ToUniversalTime()).TotalDays;
+        if (days <= 14) return "ACTIVE";
+        if (days <= 45) return "STALE";
+        if (days <= 90) return "OLD";
+        return "CLEANUP_CANDIDATE";
+    }
+
+    private static string ToRelativeAge(DateTimeOffset lastCommitDate)
+    {
+        if (lastCommitDate == DateTimeOffset.MinValue)
+        {
+            return "unknown";
+        }
+
+        var days = (int)Math.Max(0, (DateTimeOffset.UtcNow - lastCommitDate.ToUniversalTime()).TotalDays);
+        return $"{days}d ago";
+    }
+
+    private static bool IsProtectedBranch(string branchName) =>
+        branchName is "main" or "master" or "develop"
+        || branchName.StartsWith("release/", StringComparison.Ordinal)
+        || branchName.StartsWith("hotfix/", StringComparison.Ordinal);
+
+    private static string BuildRecommendation(List<string> states)
+    {
+        if (states.Contains("PROTECTED", StringComparer.Ordinal)) return "Keep (protected)";
+        if (states.Contains("DIVERGED", StringComparer.Ordinal)) return "Manual review required";
+        if (states.Contains("MERGED_IN_DEVELOP", StringComparer.Ordinal) || states.Contains("MERGED_IN_MAIN", StringComparer.Ordinal)) return "Delete local + remote";
+        if (states.Contains("GONE_REMOTE", StringComparer.Ordinal)) return "Delete local";
+        if (states.Contains("NO_UPSTREAM", StringComparer.Ordinal)) return "Publish or delete";
+        if (states.Contains("CLEANUP_CANDIDATE", StringComparer.Ordinal)) return "Cleanup candidate";
+        if (states.Contains("STALE", StringComparer.Ordinal) || states.Contains("OLD", StringComparer.Ordinal)) return "Review";
+        return "Keep";
+    }
+
+    private async Task<string> GetMergedStateAsync(string repositoryPath, string branchName)
+    {
+        if (branchName is "develop" or "main" or "master")
+        {
+            return string.Empty;
+        }
+
+        var mergeInDevelop = await RunGitAsync(repositoryPath, $"merge-base --is-ancestor {EscapeGitArg(branchName)} develop", printOutput: false);
+        if (mergeInDevelop.ExitCode == 0)
+        {
+            return "MERGED_IN_DEVELOP";
+        }
+
+        var mergeInMain = await RunGitAsync(repositoryPath, $"merge-base --is-ancestor {EscapeGitArg(branchName)} main", printOutput: false);
+        if (mergeInMain.ExitCode == 0)
+        {
+            return "MERGED_IN_MAIN";
+        }
+
+        return string.Empty;
+    }
+
+    private async Task<string> GetLastAuthorAsync(string repositoryPath, string branchName)
+    {
+        var result = await RunGitAsync(repositoryPath, $"log -1 --format=\"%an <%ae>\" {EscapeGitArg(branchName)}", printOutput: false);
+        return result.ExitCode == 0 ? result.Output.Trim() : "-";
+    }
+
+    private static void PrintBranchAnalysisTable(List<BranchAnalysisRow> rows)
+    {
+        Console.WriteLine("Branch | State | Last Commit | Recommendation | Last Author");
+        Console.WriteLine("--- | --- | --- | --- | ---");
+        foreach (var row in rows)
+        {
+            Console.WriteLine($"{row.Branch} | {row.State} | {row.LastCommit} | {row.Recommendation} | {row.LastAuthor}");
+        }
+    }
+
     private async Task<SyncRepositoryResult> SyncAllBranchesInRepositoryAsync(string repositoryPath, bool dryRun)
     {
         var statusResult = await RunGitAsync(repositoryPath, "status --porcelain", printOutput: false);
@@ -531,6 +747,7 @@ internal sealed class RepoSyncCli
         Console.WriteLine("Usage:");
         Console.WriteLine("  sync [--root <path>] [--dry-run]  (scan remote updates, then sync all branches in changed repos)");
         Console.WriteLine("  scan [--root <path>] [--dry-run]");
+        Console.WriteLine("  analyze-branches (--repo <path> | --root <path>) [--dry-run]");
         Console.WriteLine("  sync-project --repo <path> [--dry-run]");
         Console.WriteLine("  sync-branches --repo <path> [--dry-run]");
         Console.WriteLine("  setup-alias");
@@ -538,6 +755,7 @@ internal sealed class RepoSyncCli
         Console.WriteLine("Commands:");
         Console.WriteLine("  sync           fetch + pull current branch in all repositories");
         Console.WriteLine("  scan           find repositories that have remote updates on tracked branches");
+        Console.WriteLine("  analyze-branches analyze branch health and cleanup candidates");
         Console.WriteLine("  sync-project   fetch + pull current branch in one repository");
         Console.WriteLine("  sync-branches  fetch + pull all local branches with upstream in one repository");
         Console.WriteLine("  setup-alias    interactive setup for a global command with preconfigured root");
@@ -809,6 +1027,9 @@ internal sealed class RepoSyncCli
     {
         public bool HasUpstream => !string.IsNullOrWhiteSpace(Upstream);
     }
+
+    private readonly record struct LocalBranchRef(string Name, string Upstream, string TrackShort, DateTimeOffset LastCommitDate);
+    private readonly record struct BranchAnalysisRow(string Branch, string State, string LastCommit, string Recommendation, string LastAuthor);
 
     private readonly record struct CurrentBranchInfo(string Branch, string Upstream, bool IsValid)
     {

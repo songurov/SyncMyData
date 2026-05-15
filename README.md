@@ -96,6 +96,13 @@ syncmydata --dry-run
 dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- scan --root /Users/<username>/Code
 ```
 
+### Analyze branch health and cleanup candidates
+
+```bash
+dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- analyze-branches --repo /Users/<username>/Code/my-repo
+dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- analyze-branches --root /Users/<username>/Code
+```
+
 ### Dry Run (does not execute Git commands)
 
 ```bash
