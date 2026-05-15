@@ -358,6 +358,13 @@ internal sealed class RepoSyncCli
 
     private static IEnumerable<string> FindGitRepositories(string rootDirectory)
     {
+        var enumerationOptions = new EnumerationOptions
+        {
+            RecurseSubdirectories = false,
+            IgnoreInaccessible = true,
+            AttributesToSkip = FileAttributes.ReparsePoint
+        };
+
         var pending = new Stack<string>();
         pending.Push(rootDirectory);
 
@@ -371,19 +378,16 @@ internal sealed class RepoSyncCli
                 continue;
             }
 
-            IEnumerable<string> children;
             try
             {
-                children = Directory.EnumerateDirectories(current);
+                foreach (var child in Directory.EnumerateDirectories(current, "*", enumerationOptions))
+                {
+                    pending.Push(child);
+                }
             }
             catch
             {
                 continue;
-            }
-
-            foreach (var child in children)
-            {
-                pending.Push(child);
             }
         }
     }
