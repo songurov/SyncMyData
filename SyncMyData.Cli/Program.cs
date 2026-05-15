@@ -508,7 +508,7 @@ internal sealed class RepoSyncCli
                     "REMOTE_ONLY",
                     string.Join(",", remoteStates.Distinct(StringComparer.Ordinal)),
                     ToRelativeAge(remote.LastCommitDate),
-                    remoteAge is >= 30 ? "Cleanup candidate (remote-only + 30d+)" : "Review and optionally checkout locally",
+                    remoteAge is >= 30 ? "CleanupCandidate" : "RemoteReview",
                     remoteAuthor,
                     remoteAge,
                     string.Empty));
@@ -516,7 +516,13 @@ internal sealed class RepoSyncCli
         }
 
         var filtered = ApplyAnalyzeFilters(rows, options);
-        PrintBranchAnalysisTable(filtered.OrderBy(x => x.Branch, StringComparer.OrdinalIgnoreCase).ToList());
+        var ordered = filtered
+            .OrderByDescending(ComputeBranchScore)
+            .ThenByDescending(x => x.AgeDays ?? -1)
+            .ThenBy(x => x.Branch, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        PrintBranchAnalysisTable(ordered);
         PrintGroupedSummary(filtered);
         PrintCleanupCandidates(filtered);
     }
@@ -588,16 +594,16 @@ internal sealed class RepoSyncCli
 
     private static string BuildRecommendation(List<string> states, int? ageDays)
     {
-        if (states.Contains("PROTECTED", StringComparer.Ordinal)) return "Keep (protected)";
-        if (states.Contains("DIVERGED", StringComparer.Ordinal)) return "Manual review required";
+        if (states.Contains("PROTECTED", StringComparer.Ordinal)) return "Protected";
+        if (states.Contains("DIVERGED", StringComparer.Ordinal)) return "ManualReview";
         if ((states.Contains("MERGED_IN_DEVELOP", StringComparer.Ordinal) || states.Contains("MERGED_IN_MAIN", StringComparer.Ordinal)) && ageDays is >= 30)
         {
-            return "Possible remove (merged + 30d+ old)";
+            return "RemoveCandidate";
         }
-        if (states.Contains("MERGED_IN_DEVELOP", StringComparer.Ordinal) || states.Contains("MERGED_IN_MAIN", StringComparer.Ordinal)) return "Keep/Review (recently merged)";
-        if (states.Contains("GONE_REMOTE", StringComparer.Ordinal)) return "Delete local";
-        if (states.Contains("NO_UPSTREAM", StringComparer.Ordinal)) return "Publish or delete";
-        if (states.Contains("CLEANUP_CANDIDATE", StringComparer.Ordinal)) return "Cleanup candidate";
+        if (states.Contains("MERGED_IN_DEVELOP", StringComparer.Ordinal) || states.Contains("MERGED_IN_MAIN", StringComparer.Ordinal)) return "MergedRecent";
+        if (states.Contains("GONE_REMOTE", StringComparer.Ordinal)) return "DeleteLocal";
+        if (states.Contains("NO_UPSTREAM", StringComparer.Ordinal)) return "PublishOrDelete";
+        if (states.Contains("CLEANUP_CANDIDATE", StringComparer.Ordinal)) return "CleanupCandidate";
         if (states.Contains("STALE", StringComparer.Ordinal) || states.Contains("OLD", StringComparer.Ordinal)) return "Review";
         return "Keep";
     }
@@ -685,11 +691,11 @@ internal sealed class RepoSyncCli
             row.LastCommit,
             string.IsNullOrWhiteSpace(row.MergeState) ? "UNKNOWN" : row.MergeState,
             ComputeBranchScore(row).ToString(),
-            row.LastAuthor,
+            ExtractEmail(row.LastAuthor),
             row.Recommendation
         }).ToList();
 
-        var maxWidths = new[] { 42, 12, 10, 16, 5, 30, 36 };
+        var maxWidths = new[] { 42, 12, 10, 16, 5, 28, 18 };
         var widths = new int[headers.Length];
         for (var i = 0; i < headers.Length; i++)
         {
@@ -740,6 +746,18 @@ internal sealed class RepoSyncCli
         return value[..(maxWidth - 1)] + "…";
     }
 
+    private static string ExtractEmail(string author)
+    {
+        var start = author.IndexOf('<');
+        var end = author.IndexOf('>');
+        if (start >= 0 && end > start)
+        {
+            return author[(start + 1)..end];
+        }
+
+        return author;
+    }
+
     private static int ComputeBranchScore(BranchAnalysisRow row)
     {
         if (row.State.Contains("PROTECTED", StringComparison.Ordinal)) return 100;
@@ -772,8 +790,10 @@ internal sealed class RepoSyncCli
     private static void PrintCleanupCandidates(List<BranchAnalysisRow> rows)
     {
         var candidates = rows
-            .Where(x => x.Recommendation.Contains("Possible remove", StringComparison.OrdinalIgnoreCase)
-                || x.Recommendation.Contains("Cleanup candidate", StringComparison.OrdinalIgnoreCase))
+            .Where(x => x.Recommendation.Contains("RemoveCandidate", StringComparison.OrdinalIgnoreCase)
+                || x.Recommendation.Contains("CleanupCandidate", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(x => x.AgeDays ?? -1)
+            .ThenBy(x => x.Branch, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
         Console.WriteLine();
