@@ -676,13 +676,68 @@ internal sealed class RepoSyncCli
     private static void PrintBranchAnalysisTable(List<BranchAnalysisRow> rows)
     {
         Console.WriteLine($"Branches: {rows.Count}");
-        Console.WriteLine("Branch | Type | Activity | Merge State | Score | Last Author | Recommendation");
-        Console.WriteLine("--- | --- | --- | --- | --- | --- | ---");
-        foreach (var row in rows)
+
+        var headers = new[] { "Branch", "Type", "Activity", "Merge State", "Score", "Last Author", "Recommendation" };
+        var dataRows = rows.Select(row => new[]
         {
-            var mergeState = string.IsNullOrWhiteSpace(row.MergeState) ? "UNKNOWN" : row.MergeState;
-            Console.WriteLine($"{row.Branch} | {row.Type} | {row.LastCommit} | {mergeState} | {ComputeBranchScore(row)} | {row.LastAuthor} | {row.Recommendation}");
+            row.Branch,
+            row.Type,
+            row.LastCommit,
+            string.IsNullOrWhiteSpace(row.MergeState) ? "UNKNOWN" : row.MergeState,
+            ComputeBranchScore(row).ToString(),
+            row.LastAuthor,
+            row.Recommendation
+        }).ToList();
+
+        var maxWidths = new[] { 42, 12, 10, 16, 5, 30, 36 };
+        var widths = new int[headers.Length];
+        for (var i = 0; i < headers.Length; i++)
+        {
+            var contentMax = dataRows.Count == 0 ? 0 : dataRows.Max(r => r[i].Length);
+            widths[i] = Math.Min(maxWidths[i], Math.Max(headers[i].Length, contentMax));
         }
+
+        PrintFixedTableLine(widths, '+', '-');
+        PrintFixedTableRow(headers, widths);
+        PrintFixedTableLine(widths, '+', '-');
+        foreach (var row in dataRows)
+        {
+            PrintFixedTableRow(row, widths);
+        }
+        PrintFixedTableLine(widths, '+', '-');
+    }
+
+    private static void PrintFixedTableLine(int[] widths, char corner, char fill)
+    {
+        var parts = widths.Select(width => new string(fill, width + 2));
+        Console.WriteLine($"{corner}{string.Join(corner, parts)}{corner}");
+    }
+
+    private static void PrintFixedTableRow(string[] cells, int[] widths)
+    {
+        var rendered = new string[cells.Length];
+        for (var i = 0; i < cells.Length; i++)
+        {
+            var value = TruncateWithEllipsis(cells[i], widths[i]);
+            rendered[i] = " " + value.PadRight(widths[i]) + " ";
+        }
+
+        Console.WriteLine($"|{string.Join("|", rendered)}|");
+    }
+
+    private static string TruncateWithEllipsis(string value, int maxWidth)
+    {
+        if (value.Length <= maxWidth)
+        {
+            return value;
+        }
+
+        if (maxWidth <= 1)
+        {
+            return value[..maxWidth];
+        }
+
+        return value[..(maxWidth - 1)] + "…";
     }
 
     private static int ComputeBranchScore(BranchAnalysisRow row)
@@ -728,14 +783,36 @@ internal sealed class RepoSyncCli
             return;
         }
 
-        Console.WriteLine("Branch | Last Active | Merged | Safe To Delete");
-        Console.WriteLine("--- | --- | --- | ---");
-        foreach (var candidate in candidates)
+        var headers = new[] { "Branch", "Last Active", "Merged", "Safe To Delete" };
+        var dataRows = candidates.Select(candidate =>
         {
             var merged = candidate.State.Contains("MERGED_IN_DEVELOP", StringComparison.Ordinal) || candidate.State.Contains("MERGED_IN_MAIN", StringComparison.Ordinal);
             var safeToDelete = merged && !candidate.State.Contains("PROTECTED", StringComparison.Ordinal) ? "Yes" : "Review Required";
-            Console.WriteLine($"{candidate.Branch} | {candidate.LastCommit} | {(merged ? "Yes" : "No")} | {safeToDelete}");
+            return new[]
+            {
+                candidate.Branch,
+                candidate.LastCommit,
+                merged ? "Yes" : "No",
+                safeToDelete
+            };
+        }).ToList();
+
+        var maxWidths = new[] { 42, 12, 8, 16 };
+        var widths = new int[headers.Length];
+        for (var i = 0; i < headers.Length; i++)
+        {
+            var contentMax = dataRows.Count == 0 ? 0 : dataRows.Max(r => r[i].Length);
+            widths[i] = Math.Min(maxWidths[i], Math.Max(headers[i].Length, contentMax));
         }
+
+        PrintFixedTableLine(widths, '+', '-');
+        PrintFixedTableRow(headers, widths);
+        PrintFixedTableLine(widths, '+', '-');
+        foreach (var row in dataRows)
+        {
+            PrintFixedTableRow(row, widths);
+        }
+        PrintFixedTableLine(widths, '+', '-');
     }
 
     private async Task<SyncRepositoryResult> SyncAllBranchesInRepositoryAsync(string repositoryPath, bool dryRun)
