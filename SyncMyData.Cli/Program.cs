@@ -662,8 +662,8 @@ internal sealed class RepoSyncCli
 
         if (options.CleanupCandidatesOnly)
         {
-            query = query.Where(x => x.Recommendation.Contains("Cleanup candidate", StringComparison.OrdinalIgnoreCase)
-                || x.Recommendation.Contains("Possible remove", StringComparison.OrdinalIgnoreCase));
+            query = query.Where(x => x.Recommendation.Contains("CleanupCandidate", StringComparison.OrdinalIgnoreCase)
+                || x.Recommendation.Contains("RemoveCandidate", StringComparison.OrdinalIgnoreCase));
         }
 
         if (!string.IsNullOrWhiteSpace(options.AuthorFilter))
@@ -683,9 +683,10 @@ internal sealed class RepoSyncCli
     {
         Console.WriteLine($"Branches: {rows.Count}");
 
-        var headers = new[] { "Branch", "Type", "Activity", "Merge State", "Score", "Last Author", "Recommendation" };
-        var dataRows = rows.Select(row => new[]
+        var headers = new[] { "Nr.", "Branch", "Type", "Activity", "Merge State", "Score", "Last Author", "Recommendation" };
+        var dataRows = rows.Select((row, index) => new[]
         {
+            (index + 1).ToString(),
             row.Branch,
             row.Type,
             row.LastCommit,
@@ -695,7 +696,7 @@ internal sealed class RepoSyncCli
             row.Recommendation
         }).ToList();
 
-        var maxWidths = new[] { 42, 12, 10, 16, 5, 28, 18 };
+        var maxWidths = new[] { 4, 42, 12, 10, 16, 5, 28, 18 };
         var widths = new int[headers.Length];
         for (var i = 0; i < headers.Length; i++)
         {
@@ -803,13 +804,14 @@ internal sealed class RepoSyncCli
             return;
         }
 
-        var headers = new[] { "Branch", "Last Active", "Merged", "Safe To Delete" };
-        var dataRows = candidates.Select(candidate =>
+        var headers = new[] { "Nr.", "Branch", "Last Active", "Merged", "Safe To Delete" };
+        var dataRows = candidates.Select((candidate, index) =>
         {
             var merged = candidate.State.Contains("MERGED_IN_DEVELOP", StringComparison.Ordinal) || candidate.State.Contains("MERGED_IN_MAIN", StringComparison.Ordinal);
             var safeToDelete = merged && !candidate.State.Contains("PROTECTED", StringComparison.Ordinal) ? "Yes" : "Review Required";
             return new[]
             {
+                (index + 1).ToString(),
                 candidate.Branch,
                 candidate.LastCommit,
                 merged ? "Yes" : "No",
@@ -817,7 +819,7 @@ internal sealed class RepoSyncCli
             };
         }).ToList();
 
-        var maxWidths = new[] { 42, 12, 8, 16 };
+        var maxWidths = new[] { 4, 42, 12, 8, 16 };
         var widths = new int[headers.Length];
         for (var i = 0; i < headers.Length; i++)
         {
