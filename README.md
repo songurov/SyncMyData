@@ -2,11 +2,22 @@
 
 A C# CLI for automating local workflows.
 
-The first implemented feature is automatic synchronization of Git repositories on macOS.
+Current features:
+- scan all repositories and detect remote updates
+- sync current branch in all repositories
+- sync all local branches with upstream in one repository
 
 ## How It Works
 
-The `sync` command:
+### `scan`
+
+1. Recursively scans a root folder.
+2. Finds all directories that contain `.git`.
+3. Runs `git fetch --all --prune` for each repository.
+4. Checks all local branches that track an upstream branch.
+5. Shows repositories where branches are behind/diverged from remote.
+
+### `sync`
 
 1. Recursively scans a root folder.
 2. Finds all directories that contain `.git`.
@@ -14,6 +25,16 @@ The `sync` command:
    - `git fetch --all --prune`
    - `git pull --ff-only`
 4. Prints status and any errors per repository.
+
+### `sync-branches`
+
+1. Targets one repository (`--repo <path>`).
+2. Validates that the repository has no local changes.
+3. Iterates all local branches that have upstream tracking.
+4. For each branch:
+   - `git checkout <branch>`
+   - `git pull --ff-only`
+5. Returns to the original branch.
 
 ## Requirements
 
@@ -45,6 +66,12 @@ dotnet build SyncMyData.Cli/SyncMyData.Cli.csproj -c Release
 dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- --help
 ```
 
+### Scan repositories for remote updates
+
+```bash
+dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- scan --root /Users/<username>/Code
+```
+
 ### Dry Run (does not execute Git commands)
 
 ```bash
@@ -65,6 +92,12 @@ If you do not pass `--root`, the tool automatically uses the current user's home
 dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- sync
 ```
 
+### Sync all branches in one repository
+
+```bash
+dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- sync-branches --repo /Users/<username>/Code/my-repo
+```
+
 ## Local Publish (Optional)
 
 To generate a local executable:
@@ -79,12 +112,13 @@ Then run:
 ./publish/SyncMyData.Cli sync --dry-run
 ```
 
-## `sync` Command Options
+## Command Options
 
 - `--root <path>`: root folder where scanning starts
 - `--dry-run`: shows what would run without executing commands
+- `--repo <path>`: target repository for `sync-branches`
 
 ## Current Limitations
 
-- Sync runs sequentially (not in parallel).
+- Operations run sequentially (not in parallel).
 - There is no config file yet for multiple root paths.
