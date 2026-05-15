@@ -69,6 +69,27 @@ dotnet build SyncMyData.Cli/SyncMyData.Cli.csproj -c Release
 dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- --help
 ```
 
+### Setup a global alias with preconfigured root
+
+```bash
+dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- setup-alias
+```
+
+The setup is interactive and asks:
+- alias name (example: `syncmydata`)
+- root folder (example: `/Users/songurov/Documents`)
+
+It creates a global command in `~/.local/bin/<alias>` and updates `~/.zshrc` to include `~/.local/bin` in `PATH`.
+
+After setup:
+
+```bash
+source ~/.zshrc
+syncmydata scan
+syncmydata sync --dry-run
+syncmydata --dry-run
+```
+
 ### Scan repositories for remote updates
 
 ```bash

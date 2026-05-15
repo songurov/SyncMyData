@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 
 var cli = new RepoSyncCli();
 return await cli.RunAsync(args);
@@ -16,15 +17,24 @@ internal sealed class RepoSyncCli
         var command = args[0].ToLowerInvariant();
         var commandArgs = args.Skip(1).ToArray();
 
+        if (IsGlobalOption(command))
+        {
+            return await RunSyncAsync(args);
+        }
+
         return command switch
         {
             "sync" => await RunSyncAsync(commandArgs),
             "scan" => await RunScanAsync(commandArgs),
             "sync-project" => await RunSyncProjectAsync(commandArgs),
             "sync-branches" => await RunSyncBranchesAsync(commandArgs),
+            "setup-alias" => await RunSetupAliasAsync(commandArgs),
             _ => UnknownCommand(command)
         };
     }
+
+    private static bool IsGlobalOption(string arg) =>
+        arg.StartsWith("--", StringComparison.Ordinal);
 
     private async Task<int> RunSyncAsync(string[] args)
     {
@@ -151,6 +161,63 @@ internal sealed class RepoSyncCli
         }
 
         Console.WriteLine("Project sync completed successfully.");
+        return 0;
+    }
+
+    private async Task<int> RunSetupAliasAsync(string[] args)
+    {
+        if (args.Length > 0)
+        {
+            Console.Error.WriteLine("setup-alias does not accept arguments.");
+            return 1;
+        }
+
+        var defaultAlias = "syncmydata";
+        var defaultRoot = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+        Console.Write($"Alias name [{defaultAlias}]: ");
+        var aliasNameInput = Console.ReadLine()?.Trim();
+        var aliasName = string.IsNullOrWhiteSpace(aliasNameInput) ? defaultAlias : aliasNameInput;
+        if (!IsValidAliasName(aliasName))
+        {
+            Console.Error.WriteLine("Invalid alias name. Use letters, numbers, dash, or underscore.");
+            return 1;
+        }
+
+        Console.Write($"Root folder [{defaultRoot}]: ");
+        var rootInput = Console.ReadLine()?.Trim();
+        var rootFolder = string.IsNullOrWhiteSpace(rootInput) ? defaultRoot : rootInput;
+        rootFolder = Path.GetFullPath(rootFolder);
+        if (!Directory.Exists(rootFolder))
+        {
+            Console.Error.WriteLine($"Root path does not exist: {rootFolder}");
+            return 1;
+        }
+
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var localBin = Path.Combine(home, ".local", "bin");
+        Directory.CreateDirectory(localBin);
+
+        var scriptPath = Path.Combine(localBin, aliasName);
+        var dllPath = GetDllPathForAlias();
+        var script = BuildAliasScript(dllPath, rootFolder);
+        await File.WriteAllTextAsync(scriptPath, script, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+
+        await RunProcessAsync("chmod", $"+x {EscapeShellArg(scriptPath)}");
+        EnsurePathEntryInZshRc(home);
+
+        Console.WriteLine();
+        Console.WriteLine($"Alias command created: {scriptPath}");
+        Console.WriteLine($"Configured root: {rootFolder}");
+        Console.WriteLine();
+        Console.WriteLine("Reload shell:");
+        Console.WriteLine("  source ~/.zshrc");
+        Console.WriteLine();
+        Console.WriteLine("Examples:");
+        Console.WriteLine($"  {aliasName} scan");
+        Console.WriteLine($"  {aliasName} sync --dry-run");
+        Console.WriteLine($"  {aliasName} --dry-run");
+
         return 0;
     }
 
@@ -462,12 +529,14 @@ internal sealed class RepoSyncCli
         Console.WriteLine("  scan [--root <path>] [--dry-run]");
         Console.WriteLine("  sync-project --repo <path> [--dry-run]");
         Console.WriteLine("  sync-branches --repo <path> [--dry-run]");
+        Console.WriteLine("  setup-alias");
         Console.WriteLine();
         Console.WriteLine("Commands:");
         Console.WriteLine("  sync           fetch + pull current branch in all repositories");
         Console.WriteLine("  scan           find repositories that have remote updates on tracked branches");
         Console.WriteLine("  sync-project   fetch + pull current branch in one repository");
         Console.WriteLine("  sync-branches  fetch + pull all local branches with upstream in one repository");
+        Console.WriteLine("  setup-alias    interactive setup for a global command with preconfigured root");
     }
 
     private static RootedOptions ParseRootedOptions(string[] args)
@@ -623,6 +692,86 @@ internal sealed class RepoSyncCli
     }
 
     private static string EscapeGitArg(string value) => $"\"{value.Replace("\"", "\\\"", StringComparison.Ordinal)}\"";
+
+    private static bool IsValidAliasName(string aliasName) =>
+        aliasName.All(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_');
+
+    private static string GetDllPathForAlias()
+    {
+        var baseDirectory = AppContext.BaseDirectory;
+        return Path.GetFullPath(Path.Combine(baseDirectory, "SyncMyData.Cli.dll"));
+    }
+
+    private static string BuildAliasScript(string dllPath, string rootFolder)
+    {
+        return string.Join(
+            '\n',
+            "#!/bin/zsh",
+            "set -e",
+            $"dotnet {EscapeShellArg(dllPath)} \"$@\" --root {EscapeShellArg(rootFolder)}",
+            string.Empty);
+    }
+
+    private static async Task RunProcessAsync(string fileName, string arguments)
+    {
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = fileName,
+                Arguments = arguments,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false
+            }
+        };
+
+        process.Start();
+        await process.WaitForExitAsync();
+    }
+
+    private static void EnsurePathEntryInZshRc(string home)
+    {
+        var zshRcPath = Path.Combine(home, ".zshrc");
+        var markerStart = "# >>> SyncMyData alias path >>>";
+        var markerEnd = "# <<< SyncMyData alias path <<<";
+        var block = string.Join(
+            '\n',
+            markerStart,
+            "export PATH=\"$HOME/.local/bin:$PATH\"",
+            markerEnd,
+            string.Empty);
+
+        if (!File.Exists(zshRcPath))
+        {
+            File.WriteAllText(zshRcPath, block);
+            return;
+        }
+
+        var current = File.ReadAllText(zshRcPath);
+        if (current.Contains(markerStart, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (!current.EndsWith('\n'))
+        {
+            current += '\n';
+        }
+
+        current += block;
+        File.WriteAllText(zshRcPath, current);
+    }
+
+    private static string EscapeShellArg(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return "''";
+        }
+
+        return "'" + value.Replace("'", "'\"'\"'", StringComparison.Ordinal) + "'";
+    }
 
     private readonly record struct RootedOptions(string RootDirectory, bool DryRun, bool IsValid, string Error)
     {
