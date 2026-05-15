@@ -704,12 +704,16 @@ internal sealed class RepoSyncCli
             widths[i] = Math.Min(maxWidths[i], Math.Max(headers[i].Length, contentMax));
         }
 
+        var authorColorMap = BuildAuthorColorMap(dataRows.Select(r => r[6]).ToList());
+
         PrintFixedTableLine(widths, '+', '-');
         PrintFixedTableRow(headers, widths);
         PrintFixedTableLine(widths, '+', '-');
         foreach (var row in dataRows)
         {
-            PrintFixedTableRow(row, widths);
+            var authorEmail = row[6];
+            var colorCode = authorColorMap.GetValueOrDefault(authorEmail, string.Empty);
+            PrintFixedTableRow(row, widths, colorCode);
         }
         PrintFixedTableLine(widths, '+', '-');
     }
@@ -720,7 +724,7 @@ internal sealed class RepoSyncCli
         Console.WriteLine($"{corner}{string.Join(corner, parts)}{corner}");
     }
 
-    private static void PrintFixedTableRow(string[] cells, int[] widths)
+    private static void PrintFixedTableRow(string[] cells, int[] widths, string? ansiColorCode = null)
     {
         var rendered = new string[cells.Length];
         for (var i = 0; i < cells.Length; i++)
@@ -729,7 +733,14 @@ internal sealed class RepoSyncCli
             rendered[i] = " " + value.PadRight(widths[i]) + " ";
         }
 
-        Console.WriteLine($"|{string.Join("|", rendered)}|");
+        var line = $"|{string.Join("|", rendered)}|";
+        if (!string.IsNullOrWhiteSpace(ansiColorCode))
+        {
+            Console.WriteLine($"{ansiColorCode}{line}\u001b[0m");
+            return;
+        }
+
+        Console.WriteLine(line);
     }
 
     private static string TruncateWithEllipsis(string value, int maxWidth)
@@ -757,6 +768,43 @@ internal sealed class RepoSyncCli
         }
 
         return author;
+    }
+
+    private static Dictionary<string, string> BuildAuthorColorMap(List<string> authorEmails)
+    {
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var palette = new[]
+        {
+            "\u001b[38;5;39m",  // blue
+            "\u001b[38;5;46m",  // green
+            "\u001b[38;5;214m", // orange
+            "\u001b[38;5;201m", // pink
+            "\u001b[38;5;51m",  // cyan
+            "\u001b[38;5;220m", // yellow
+            "\u001b[38;5;141m", // purple
+            "\u001b[38;5;196m", // red
+            "\u001b[38;5;82m",
+            "\u001b[38;5;45m",
+            "\u001b[38;5;208m",
+            "\u001b[38;5;213m",
+            "\u001b[38;5;14m",
+            "\u001b[38;5;226m",
+            "\u001b[38;5;129m",
+            "\u001b[38;5;160m"
+        };
+
+        var uniqueAuthors = authorEmails
+            .Where(email => !string.IsNullOrWhiteSpace(email) && email != "-")
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        for (var i = 0; i < uniqueAuthors.Count; i++)
+        {
+            map[uniqueAuthors[i]] = palette[i % palette.Length];
+        }
+
+        return map;
     }
 
     private static int ComputeBranchScore(BranchAnalysisRow row)
