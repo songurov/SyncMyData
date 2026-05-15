@@ -140,16 +140,31 @@ internal sealed class RepoSyncCli
 
         if (!string.IsNullOrWhiteSpace(options.RepositoryPath))
         {
-            await AnalyzeRepositoryAsync(options.RepositoryPath, options);
+            var report = await AnalyzeRepositoryAsync(options.RepositoryPath, options);
+            if (options.CopyToClipboard)
+            {
+                await CopyToClipboardAsync(report);
+                Console.WriteLine();
+                Console.WriteLine("Report copied to clipboard.");
+            }
             return 0;
         }
 
         var repositories = FindGitRepositories(options.RootDirectory).ToList();
         Console.WriteLine($"Found {repositories.Count} repositories in {options.RootDirectory}");
+        var combinedReport = new StringBuilder();
         foreach (var repository in repositories)
         {
             Console.WriteLine();
-            await AnalyzeRepositoryAsync(repository, options);
+            var report = await AnalyzeRepositoryAsync(repository, options);
+            combinedReport.AppendLine(report);
+        }
+
+        if (options.CopyToClipboard)
+        {
+            await CopyToClipboardAsync(combinedReport.ToString());
+            Console.WriteLine();
+            Console.WriteLine("Combined report copied to clipboard.");
         }
 
         return 0;
@@ -436,9 +451,11 @@ internal sealed class RepoSyncCli
         return new RepositoryScanResult(repository, true, remoteChanged, foundMessage);
     }
 
-    private async Task AnalyzeRepositoryAsync(string repositoryPath, AnalyzeOptions options)
+    private async Task<string> AnalyzeRepositoryAsync(string repositoryPath, AnalyzeOptions options)
     {
+        var report = new StringBuilder();
         Console.WriteLine($"Repository: {repositoryPath}");
+        report.AppendLine($"Repository: {repositoryPath}");
         if (!options.DryRun)
         {
             await RunGitAsync(repositoryPath, "fetch --all --prune", printOutput: false);
@@ -522,9 +539,10 @@ internal sealed class RepoSyncCli
             .ThenBy(x => x.Branch, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        PrintBranchAnalysisTable(ordered);
-        PrintGroupedSummary(filtered);
-        PrintCleanupCandidates(filtered);
+        PrintBranchAnalysisTable(ordered, report);
+        PrintGroupedSummary(filtered, report);
+        PrintCleanupCandidates(filtered, report);
+        return report.ToString();
     }
 
     private static List<LocalBranchRef> ParseLocalBranchRefs(string output)
@@ -686,9 +704,10 @@ internal sealed class RepoSyncCli
         return query.ToList();
     }
 
-    private static void PrintBranchAnalysisTable(List<BranchAnalysisRow> rows)
+    private static void PrintBranchAnalysisTable(List<BranchAnalysisRow> rows, StringBuilder report)
     {
         Console.WriteLine($"Branches: {rows.Count}");
+        report.AppendLine($"Branches: {rows.Count}");
 
         var headers = new[] { "Nr.", "Branch", "Type", "Activity", "Merge State", "Score", "Last Author", "Recommendation" };
         var dataRows = rows.Select((row, index) => new[]
@@ -713,25 +732,27 @@ internal sealed class RepoSyncCli
 
         var authorColorMap = BuildAuthorColorMap(dataRows.Select(r => r[6]).ToList());
 
-        PrintFixedTableLine(widths, '+', '-');
-        PrintFixedTableRow(headers, widths);
-        PrintFixedTableLine(widths, '+', '-');
+        PrintFixedTableLine(widths, '+', '-', report);
+        PrintFixedTableRow(headers, widths, report);
+        PrintFixedTableLine(widths, '+', '-', report);
         foreach (var row in dataRows)
         {
             var authorEmail = row[6];
             var colorCode = authorColorMap.GetValueOrDefault(authorEmail, string.Empty);
-            PrintFixedTableRow(row, widths, colorCode);
+            PrintFixedTableRow(row, widths, report, colorCode);
         }
-        PrintFixedTableLine(widths, '+', '-');
+        PrintFixedTableLine(widths, '+', '-', report);
     }
 
-    private static void PrintFixedTableLine(int[] widths, char corner, char fill)
+    private static void PrintFixedTableLine(int[] widths, char corner, char fill, StringBuilder report)
     {
         var parts = widths.Select(width => new string(fill, width + 2));
-        Console.WriteLine($"{corner}{string.Join(corner, parts)}{corner}");
+        var line = $"{corner}{string.Join(corner, parts)}{corner}";
+        Console.WriteLine(line);
+        report.AppendLine(line);
     }
 
-    private static void PrintFixedTableRow(string[] cells, int[] widths, string? ansiColorCode = null)
+    private static void PrintFixedTableRow(string[] cells, int[] widths, StringBuilder report, string? ansiColorCode = null)
     {
         var rendered = new string[cells.Length];
         for (var i = 0; i < cells.Length; i++)
@@ -741,6 +762,7 @@ internal sealed class RepoSyncCli
         }
 
         var line = $"|{string.Join("|", rendered)}|";
+        report.AppendLine(line);
         if (!string.IsNullOrWhiteSpace(ansiColorCode))
         {
             Console.WriteLine($"{ansiColorCode}{line}\u001b[0m");
@@ -826,7 +848,7 @@ internal sealed class RepoSyncCli
         return 50;
     }
 
-    private static void PrintGroupedSummary(List<BranchAnalysisRow> rows)
+    private static void PrintGroupedSummary(List<BranchAnalysisRow> rows, StringBuilder report)
     {
         var remoteOnly = rows.Count(x => x.State.Contains("REMOTE_ONLY", StringComparison.Ordinal));
         var localMerged = rows.Count(x => x.State.Contains("MERGED_IN_DEVELOP", StringComparison.Ordinal) || x.State.Contains("MERGED_IN_MAIN", StringComparison.Ordinal));
@@ -841,9 +863,16 @@ internal sealed class RepoSyncCli
         Console.WriteLine($"  STALE: {stale}");
         Console.WriteLine($"  ACTIVE: {active}");
         Console.WriteLine($"  PROTECTED: {protectedCount}");
+        report.AppendLine();
+        report.AppendLine("Groups:");
+        report.AppendLine($"  REMOTE_ONLY: {remoteOnly}");
+        report.AppendLine($"  LOCAL_MERGED: {localMerged}");
+        report.AppendLine($"  STALE: {stale}");
+        report.AppendLine($"  ACTIVE: {active}");
+        report.AppendLine($"  PROTECTED: {protectedCount}");
     }
 
-    private static void PrintCleanupCandidates(List<BranchAnalysisRow> rows)
+    private static void PrintCleanupCandidates(List<BranchAnalysisRow> rows, StringBuilder report)
     {
         var candidates = rows
             .Where(x => x.Recommendation.Contains("RemoveCandidate", StringComparison.OrdinalIgnoreCase)
@@ -854,6 +883,8 @@ internal sealed class RepoSyncCli
 
         Console.WriteLine();
         Console.WriteLine($"Cleanup Candidates: {candidates.Count}");
+        report.AppendLine();
+        report.AppendLine($"Cleanup Candidates: {candidates.Count}");
         if (candidates.Count == 0)
         {
             return;
@@ -882,14 +913,32 @@ internal sealed class RepoSyncCli
             widths[i] = Math.Min(maxWidths[i], Math.Max(headers[i].Length, contentMax));
         }
 
-        PrintFixedTableLine(widths, '+', '-');
-        PrintFixedTableRow(headers, widths);
-        PrintFixedTableLine(widths, '+', '-');
+        PrintFixedTableLine(widths, '+', '-', report);
+        PrintFixedTableRow(headers, widths, report);
+        PrintFixedTableLine(widths, '+', '-', report);
         foreach (var row in dataRows)
         {
-            PrintFixedTableRow(row, widths);
+            PrintFixedTableRow(row, widths, report);
         }
-        PrintFixedTableLine(widths, '+', '-');
+        PrintFixedTableLine(widths, '+', '-', report);
+    }
+
+    private static async Task CopyToClipboardAsync(string text)
+    {
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = "pbcopy",
+                RedirectStandardInput = true,
+                UseShellExecute = false
+            }
+        };
+
+        process.Start();
+        await process.StandardInput.WriteAsync(text);
+        process.StandardInput.Close();
+        await process.WaitForExitAsync();
     }
 
     private async Task<SyncRepositoryResult> SyncAllBranchesInRepositoryAsync(string repositoryPath, bool dryRun)
@@ -1014,7 +1063,7 @@ internal sealed class RepoSyncCli
         Console.WriteLine("Usage:");
         Console.WriteLine("  sync [--root <path>] [--dry-run]  (scan remote updates, then sync all branches in changed repos)");
         Console.WriteLine("  scan [--root <path>] [--dry-run]");
-        Console.WriteLine("  analyze-branches (--repo <path> | --root <path>) [--dry-run] [--state <value>] [--merged] [--cleanup-candidates] [--author <name>] [--match <text>] [--older-than <days>]");
+        Console.WriteLine("  analyze-branches (--repo <path> | --root <path>) [--dry-run] [--state <value>] [--merged] [--cleanup-candidates] [--author <name>] [--match <text>] [--older-than <days>] [--copy]");
         Console.WriteLine("  sync-project --repo <path> [--dry-run]");
         Console.WriteLine("  sync-branches --repo <path> [--dry-run]");
         Console.WriteLine("  setup-alias");
@@ -1122,6 +1171,7 @@ internal sealed class RepoSyncCli
         string? authorFilter = null;
         string? matchFilter = null;
         int? olderThanDays = null;
+        var copyToClipboard = false;
 
         for (var i = 0; i < args.Length; i++)
         {
@@ -1164,6 +1214,9 @@ internal sealed class RepoSyncCli
                     }
                     olderThanDays = parsedDays;
                     break;
+                case "--copy":
+                    copyToClipboard = true;
+                    break;
                 default:
                     return AnalyzeOptions.Invalid($"Unknown option: {args[i]}");
             }
@@ -1173,7 +1226,7 @@ internal sealed class RepoSyncCli
         {
             if (!Directory.Exists(repositoryPath)) return AnalyzeOptions.Invalid($"Repository path does not exist: {repositoryPath}");
             if (!Directory.Exists(Path.Combine(repositoryPath, ".git"))) return AnalyzeOptions.Invalid($"Path is not a Git repository: {repositoryPath}");
-            return AnalyzeOptions.Valid(rootDirectory, repositoryPath, dryRun, stateFilter, mergedOnly, cleanupCandidatesOnly, authorFilter, matchFilter, olderThanDays);
+            return AnalyzeOptions.Valid(rootDirectory, repositoryPath, dryRun, stateFilter, mergedOnly, cleanupCandidatesOnly, authorFilter, matchFilter, olderThanDays, copyToClipboard);
         }
 
         if (!Directory.Exists(rootDirectory))
@@ -1181,7 +1234,7 @@ internal sealed class RepoSyncCli
             return AnalyzeOptions.Invalid($"Root path does not exist: {rootDirectory}");
         }
 
-        return AnalyzeOptions.Valid(rootDirectory, null, dryRun, stateFilter, mergedOnly, cleanupCandidatesOnly, authorFilter, matchFilter, olderThanDays);
+        return AnalyzeOptions.Valid(rootDirectory, null, dryRun, stateFilter, mergedOnly, cleanupCandidatesOnly, authorFilter, matchFilter, olderThanDays, copyToClipboard);
     }
 
     private static IEnumerable<string> FindGitRepositories(string rootDirectory)
@@ -1411,6 +1464,7 @@ internal sealed class RepoSyncCli
         string? AuthorFilter,
         string? MatchFilter,
         int? OlderThanDays,
+        bool CopyToClipboard,
         bool IsValid,
         string Error)
     {
@@ -1423,10 +1477,11 @@ internal sealed class RepoSyncCli
             bool cleanupCandidatesOnly,
             string? authorFilter,
             string? matchFilter,
-            int? olderThanDays) =>
-            new(rootDirectory, repositoryPath, dryRun, stateFilter, mergedOnly, cleanupCandidatesOnly, authorFilter, matchFilter, olderThanDays, true, string.Empty);
+            int? olderThanDays,
+            bool copyToClipboard) =>
+            new(rootDirectory, repositoryPath, dryRun, stateFilter, mergedOnly, cleanupCandidatesOnly, authorFilter, matchFilter, olderThanDays, copyToClipboard, true, string.Empty);
 
         public static AnalyzeOptions Invalid(string error) =>
-            new(string.Empty, null, false, null, false, false, null, null, null, false, error);
+            new(string.Empty, null, false, null, false, false, null, null, null, false, false, error);
     }
 }
