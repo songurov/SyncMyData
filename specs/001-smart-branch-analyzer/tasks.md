@@ -51,5 +51,30 @@
   - protected branches
 - [ ] Update README with usage examples and safety workflow.
 
+## Phase 6: Visual Style Upgrade (Branch Intelligence View)
+- [ ] Replace verbose per-branch log blocks with compact table-style terminal output.
+- [ ] Add branch columns:
+  - Branch
+  - Type (LOCAL / REMOTE_ONLY)
+  - Activity (days since last commit)
+  - Merge State
+  - Last Author
+  - Recommendation
+- [ ] Add branch scoring model (`0-100`) and render score in output.
+- [ ] Add grouped summary section:
+  - `REMOTE_ONLY`
+  - `LOCAL_MERGED`
+  - `STALE`
+  - `ACTIVE`
+  - `PROTECTED`
+- [ ] Add CLI filters for analysis:
+  - `--state <value>`
+  - `--merged`
+  - `--cleanup-candidates`
+  - `--author <name>`
+  - `--older-than <days>`
+- [ ] Add dedicated `Cleanup Candidates` section with `Safe To Delete` evaluation.
+- [ ] Evaluate adopting a terminal UI renderer (example: Spectre.Console) for improved readability.
+
 ## Execution Rule
 All implementation must follow this task list and feature spec `specs/001-smart-branch-analyzer/spec.md`.
