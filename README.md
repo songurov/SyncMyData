@@ -103,6 +103,21 @@ dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- analyze-branches --
 dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- analyze-branches --root /Users/<username>/Code
 ```
 
+Useful filters:
+
+```bash
+dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- analyze-branches --repo /Users/<username>/Code/my-repo --state STALE
+dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- analyze-branches --repo /Users/<username>/Code/my-repo --merged
+dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- analyze-branches --repo /Users/<username>/Code/my-repo --cleanup-candidates
+dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- analyze-branches --repo /Users/<username>/Code/my-repo --author fiodor
+dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- analyze-branches --repo /Users/<username>/Code/my-repo --older-than 60
+```
+
+The command prints:
+- Branch Intelligence Table
+- grouped branch summary
+- cleanup candidates table
+
 ### Dry Run (does not execute Git commands)
 
 ```bash

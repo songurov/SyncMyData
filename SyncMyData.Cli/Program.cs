@@ -131,32 +131,25 @@ internal sealed class RepoSyncCli
 
     private async Task<int> RunAnalyzeBranchesAsync(string[] args)
     {
-        if (args.Contains("--repo", StringComparer.Ordinal))
+        var options = ParseAnalyzeOptions(args);
+        if (!options.IsValid)
         {
-            var options = ParseSyncBranchesOptions(args);
-            if (!options.IsValid)
-            {
-                Console.Error.WriteLine(options.Error);
-                return 1;
-            }
-
-            await AnalyzeRepositoryAsync(options.RepositoryPath, options.DryRun);
-            return 0;
-        }
-
-        var rootedOptions = ParseRootedOptions(args);
-        if (!rootedOptions.IsValid)
-        {
-            Console.Error.WriteLine(rootedOptions.Error);
+            Console.Error.WriteLine(options.Error);
             return 1;
         }
 
-        var repositories = FindGitRepositories(rootedOptions.RootDirectory).ToList();
-        Console.WriteLine($"Found {repositories.Count} repositories in {rootedOptions.RootDirectory}");
+        if (!string.IsNullOrWhiteSpace(options.RepositoryPath))
+        {
+            await AnalyzeRepositoryAsync(options.RepositoryPath, options);
+            return 0;
+        }
+
+        var repositories = FindGitRepositories(options.RootDirectory).ToList();
+        Console.WriteLine($"Found {repositories.Count} repositories in {options.RootDirectory}");
         foreach (var repository in repositories)
         {
             Console.WriteLine();
-            await AnalyzeRepositoryAsync(repository, rootedOptions.DryRun);
+            await AnalyzeRepositoryAsync(repository, options);
         }
 
         return 0;
@@ -443,10 +436,10 @@ internal sealed class RepoSyncCli
         return new RepositoryScanResult(repository, true, remoteChanged, foundMessage);
     }
 
-    private async Task AnalyzeRepositoryAsync(string repositoryPath, bool dryRun)
+    private async Task AnalyzeRepositoryAsync(string repositoryPath, AnalyzeOptions options)
     {
         Console.WriteLine($"Repository: {repositoryPath}");
-        if (!dryRun)
+        if (!options.DryRun)
         {
             await RunGitAsync(repositoryPath, "fetch --all --prune", printOutput: false);
         }
@@ -493,31 +486,39 @@ internal sealed class RepoSyncCli
             var ageDays = GetAgeInDays(branch.LastCommitDate);
             rows.Add(new BranchAnalysisRow(
                 branch.Name,
+                "LOCAL",
                 string.Join(",", states.Distinct(StringComparer.Ordinal)),
                 ToRelativeAge(branch.LastCommitDate),
                 BuildRecommendation(states, ageDays),
                 lastAuthor,
                 ageDays,
-                "LOCAL"));
+                mergedState));
         }
 
-        foreach (var remote in remoteBranches.Where(x => x != "origin/HEAD" && x != "origin"))
+        foreach (var remote in remoteBranches.Where(x => x.Name != "origin/HEAD" && x.Name != "origin"))
         {
-            var shortRemote = remote.StartsWith("origin/", StringComparison.Ordinal) ? remote[7..] : remote;
+            var shortRemote = remote.Name.StartsWith("origin/", StringComparison.Ordinal) ? remote.Name[7..] : remote.Name;
             if (!localNames.Contains(shortRemote))
             {
+                var remoteAge = GetAgeInDays(remote.LastCommitDate);
+                var remoteStates = new List<string> { "REMOTE_ONLY", GetAgeState(remote.LastCommitDate) };
+                var remoteAuthor = await GetLastAuthorAsync(repositoryPath, remote.Name);
                 rows.Add(new BranchAnalysisRow(
-                    remote,
+                    remote.Name,
                     "REMOTE_ONLY",
-                    "-",
-                    "Review and optionally checkout locally",
-                    "-",
-                    null,
-                    "REMOTE_ONLY"));
+                    string.Join(",", remoteStates.Distinct(StringComparer.Ordinal)),
+                    ToRelativeAge(remote.LastCommitDate),
+                    remoteAge is >= 30 ? "Cleanup candidate (remote-only + 30d+)" : "Review and optionally checkout locally",
+                    remoteAuthor,
+                    remoteAge,
+                    string.Empty));
             }
         }
 
-        PrintBranchAnalysisReadable(rows.OrderBy(x => x.Branch, StringComparer.OrdinalIgnoreCase).ToList());
+        var filtered = ApplyAnalyzeFilters(rows, options);
+        PrintBranchAnalysisTable(filtered.OrderBy(x => x.Branch, StringComparer.OrdinalIgnoreCase).ToList());
+        PrintGroupedSummary(filtered);
+        PrintCleanupCandidates(filtered);
     }
 
     private static List<LocalBranchRef> ParseLocalBranchRefs(string output)
@@ -537,12 +538,16 @@ internal sealed class RepoSyncCli
             .ToList();
     }
 
-    private static List<string> ParseRemoteBranchRefs(string output)
+    private static List<RemoteBranchRef> ParseRemoteBranchRefs(string output)
     {
         return output
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(line => line.Split('|').FirstOrDefault() ?? string.Empty)
-            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Select(line =>
+            {
+                var parts = line.Split('|');
+                return new RemoteBranchRef(parts.ElementAtOrDefault(0) ?? string.Empty, ParseDate(parts.ElementAtOrDefault(1)));
+            })
+            .Where(x => !string.IsNullOrWhiteSpace(x.Name))
             .ToList();
     }
 
@@ -635,18 +640,101 @@ internal sealed class RepoSyncCli
         return result.ExitCode == 0 ? result.Output.Trim() : "-";
     }
 
-    private static void PrintBranchAnalysisReadable(List<BranchAnalysisRow> rows)
+    private static List<BranchAnalysisRow> ApplyAnalyzeFilters(List<BranchAnalysisRow> rows, AnalyzeOptions options)
+    {
+        IEnumerable<BranchAnalysisRow> query = rows;
+
+        if (!string.IsNullOrWhiteSpace(options.StateFilter))
+        {
+            query = query.Where(x => x.State.Contains(options.StateFilter!, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (options.MergedOnly)
+        {
+            query = query.Where(x => x.State.Contains("MERGED_IN_DEVELOP", StringComparison.Ordinal) || x.State.Contains("MERGED_IN_MAIN", StringComparison.Ordinal));
+        }
+
+        if (options.CleanupCandidatesOnly)
+        {
+            query = query.Where(x => x.Recommendation.Contains("Cleanup candidate", StringComparison.OrdinalIgnoreCase)
+                || x.Recommendation.Contains("Possible remove", StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (!string.IsNullOrWhiteSpace(options.AuthorFilter))
+        {
+            query = query.Where(x => x.LastAuthor.Contains(options.AuthorFilter!, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (options.OlderThanDays is int olderThan)
+        {
+            query = query.Where(x => x.AgeDays is int age && age > olderThan);
+        }
+
+        return query.ToList();
+    }
+
+    private static void PrintBranchAnalysisTable(List<BranchAnalysisRow> rows)
     {
         Console.WriteLine($"Branches: {rows.Count}");
+        Console.WriteLine("Branch | Type | Activity | Merge State | Score | Last Author | Recommendation");
+        Console.WriteLine("--- | --- | --- | --- | --- | --- | ---");
         foreach (var row in rows)
         {
-            Console.WriteLine();
-            Console.WriteLine($"Branch: {row.Branch}");
-            Console.WriteLine($"  Location: {row.Location}");
-            Console.WriteLine($"  Last modified: {row.LastCommit}");
-            Console.WriteLine($"  Last author: {row.LastAuthor}");
-            Console.WriteLine($"  State: {row.State}");
-            Console.WriteLine($"  Recommendation: {row.Recommendation}");
+            var mergeState = string.IsNullOrWhiteSpace(row.MergeState) ? "UNKNOWN" : row.MergeState;
+            Console.WriteLine($"{row.Branch} | {row.Type} | {row.LastCommit} | {mergeState} | {ComputeBranchScore(row)} | {row.LastAuthor} | {row.Recommendation}");
+        }
+    }
+
+    private static int ComputeBranchScore(BranchAnalysisRow row)
+    {
+        if (row.State.Contains("PROTECTED", StringComparison.Ordinal)) return 100;
+        if (row.State.Contains("DIVERGED", StringComparison.Ordinal)) return 40;
+        if (row.State.Contains("CLEANUP_CANDIDATE", StringComparison.Ordinal)) return 10;
+        if (row.State.Contains("OLD", StringComparison.Ordinal)) return 33;
+        if (row.State.Contains("STALE", StringComparison.Ordinal)) return 55;
+        if (row.State.Contains("ACTIVE", StringComparison.Ordinal) && (row.State.Contains("MERGED_IN_DEVELOP", StringComparison.Ordinal) || row.State.Contains("MERGED_IN_MAIN", StringComparison.Ordinal))) return 70;
+        if (row.State.Contains("ACTIVE", StringComparison.Ordinal)) return 92;
+        return 50;
+    }
+
+    private static void PrintGroupedSummary(List<BranchAnalysisRow> rows)
+    {
+        var remoteOnly = rows.Count(x => x.State.Contains("REMOTE_ONLY", StringComparison.Ordinal));
+        var localMerged = rows.Count(x => x.State.Contains("MERGED_IN_DEVELOP", StringComparison.Ordinal) || x.State.Contains("MERGED_IN_MAIN", StringComparison.Ordinal));
+        var stale = rows.Count(x => x.State.Contains("STALE", StringComparison.Ordinal) || x.State.Contains("OLD", StringComparison.Ordinal) || x.State.Contains("CLEANUP_CANDIDATE", StringComparison.Ordinal));
+        var active = rows.Count(x => x.State.Contains("ACTIVE", StringComparison.Ordinal));
+        var protectedCount = rows.Count(x => x.State.Contains("PROTECTED", StringComparison.Ordinal));
+
+        Console.WriteLine();
+        Console.WriteLine("Groups:");
+        Console.WriteLine($"  REMOTE_ONLY: {remoteOnly}");
+        Console.WriteLine($"  LOCAL_MERGED: {localMerged}");
+        Console.WriteLine($"  STALE: {stale}");
+        Console.WriteLine($"  ACTIVE: {active}");
+        Console.WriteLine($"  PROTECTED: {protectedCount}");
+    }
+
+    private static void PrintCleanupCandidates(List<BranchAnalysisRow> rows)
+    {
+        var candidates = rows
+            .Where(x => x.Recommendation.Contains("Possible remove", StringComparison.OrdinalIgnoreCase)
+                || x.Recommendation.Contains("Cleanup candidate", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        Console.WriteLine();
+        Console.WriteLine($"Cleanup Candidates: {candidates.Count}");
+        if (candidates.Count == 0)
+        {
+            return;
+        }
+
+        Console.WriteLine("Branch | Last Active | Merged | Safe To Delete");
+        Console.WriteLine("--- | --- | --- | ---");
+        foreach (var candidate in candidates)
+        {
+            var merged = candidate.State.Contains("MERGED_IN_DEVELOP", StringComparison.Ordinal) || candidate.State.Contains("MERGED_IN_MAIN", StringComparison.Ordinal);
+            var safeToDelete = merged && !candidate.State.Contains("PROTECTED", StringComparison.Ordinal) ? "Yes" : "Review Required";
+            Console.WriteLine($"{candidate.Branch} | {candidate.LastCommit} | {(merged ? "Yes" : "No")} | {safeToDelete}");
         }
     }
 
@@ -772,7 +860,7 @@ internal sealed class RepoSyncCli
         Console.WriteLine("Usage:");
         Console.WriteLine("  sync [--root <path>] [--dry-run]  (scan remote updates, then sync all branches in changed repos)");
         Console.WriteLine("  scan [--root <path>] [--dry-run]");
-        Console.WriteLine("  analyze-branches (--repo <path> | --root <path>) [--dry-run]");
+        Console.WriteLine("  analyze-branches (--repo <path> | --root <path>) [--dry-run] [--state <value>] [--merged] [--cleanup-candidates] [--author <name>] [--older-than <days>]");
         Console.WriteLine("  sync-project --repo <path> [--dry-run]");
         Console.WriteLine("  sync-branches --repo <path> [--dry-run]");
         Console.WriteLine("  setup-alias");
@@ -867,6 +955,74 @@ internal sealed class RepoSyncCli
         }
 
         return SyncBranchesOptions.Valid(repositoryPath, dryRun);
+    }
+
+    private static AnalyzeOptions ParseAnalyzeOptions(string[] args)
+    {
+        string? repositoryPath = null;
+        var rootDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var dryRun = false;
+        string? stateFilter = null;
+        var mergedOnly = false;
+        var cleanupCandidatesOnly = false;
+        string? authorFilter = null;
+        int? olderThanDays = null;
+
+        for (var i = 0; i < args.Length; i++)
+        {
+            switch (args[i])
+            {
+                case "--dry-run":
+                    dryRun = true;
+                    break;
+                case "--repo":
+                    if (i + 1 >= args.Length) return AnalyzeOptions.Invalid("Missing value for --repo");
+                    repositoryPath = Path.GetFullPath(args[++i]);
+                    break;
+                case "--root":
+                    if (i + 1 >= args.Length) return AnalyzeOptions.Invalid("Missing value for --root");
+                    rootDirectory = Path.GetFullPath(args[++i]);
+                    break;
+                case "--state":
+                    if (i + 1 >= args.Length) return AnalyzeOptions.Invalid("Missing value for --state");
+                    stateFilter = args[++i];
+                    break;
+                case "--merged":
+                    mergedOnly = true;
+                    break;
+                case "--cleanup-candidates":
+                    cleanupCandidatesOnly = true;
+                    break;
+                case "--author":
+                    if (i + 1 >= args.Length) return AnalyzeOptions.Invalid("Missing value for --author");
+                    authorFilter = args[++i];
+                    break;
+                case "--older-than":
+                    if (i + 1 >= args.Length) return AnalyzeOptions.Invalid("Missing value for --older-than");
+                    if (!int.TryParse(args[++i], out var parsedDays) || parsedDays < 0)
+                    {
+                        return AnalyzeOptions.Invalid("Invalid value for --older-than. Use a non-negative integer.");
+                    }
+                    olderThanDays = parsedDays;
+                    break;
+                default:
+                    return AnalyzeOptions.Invalid($"Unknown option: {args[i]}");
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(repositoryPath))
+        {
+            if (!Directory.Exists(repositoryPath)) return AnalyzeOptions.Invalid($"Repository path does not exist: {repositoryPath}");
+            if (!Directory.Exists(Path.Combine(repositoryPath, ".git"))) return AnalyzeOptions.Invalid($"Path is not a Git repository: {repositoryPath}");
+            return AnalyzeOptions.Valid(rootDirectory, repositoryPath, dryRun, stateFilter, mergedOnly, cleanupCandidatesOnly, authorFilter, olderThanDays);
+        }
+
+        if (!Directory.Exists(rootDirectory))
+        {
+            return AnalyzeOptions.Invalid($"Root path does not exist: {rootDirectory}");
+        }
+
+        return AnalyzeOptions.Valid(rootDirectory, null, dryRun, stateFilter, mergedOnly, cleanupCandidatesOnly, authorFilter, olderThanDays);
     }
 
     private static IEnumerable<string> FindGitRepositories(string rootDirectory)
@@ -1062,7 +1218,8 @@ internal sealed class RepoSyncCli
     }
 
     private readonly record struct LocalBranchRef(string Name, string Upstream, string TrackShort, DateTimeOffset LastCommitDate);
-    private readonly record struct BranchAnalysisRow(string Branch, string State, string LastCommit, string Recommendation, string LastAuthor, int? AgeDays, string Location);
+    private readonly record struct RemoteBranchRef(string Name, DateTimeOffset LastCommitDate);
+    private readonly record struct BranchAnalysisRow(string Branch, string Type, string State, string LastCommit, string Recommendation, string LastAuthor, int? AgeDays, string MergeState);
 
     private readonly record struct CurrentBranchInfo(string Branch, string Upstream, bool IsValid)
     {
@@ -1083,5 +1240,32 @@ internal sealed class RepoSyncCli
     {
         public static SyncRepositoryResult Ok() => new(true, string.Empty);
         public static SyncRepositoryResult Fail(string error) => new(false, error);
+    }
+
+    private readonly record struct AnalyzeOptions(
+        string RootDirectory,
+        string? RepositoryPath,
+        bool DryRun,
+        string? StateFilter,
+        bool MergedOnly,
+        bool CleanupCandidatesOnly,
+        string? AuthorFilter,
+        int? OlderThanDays,
+        bool IsValid,
+        string Error)
+    {
+        public static AnalyzeOptions Valid(
+            string rootDirectory,
+            string? repositoryPath,
+            bool dryRun,
+            string? stateFilter,
+            bool mergedOnly,
+            bool cleanupCandidatesOnly,
+            string? authorFilter,
+            int? olderThanDays) =>
+            new(rootDirectory, repositoryPath, dryRun, stateFilter, mergedOnly, cleanupCandidatesOnly, authorFilter, olderThanDays, true, string.Empty);
+
+        public static AnalyzeOptions Invalid(string error) =>
+            new(string.Empty, null, false, null, false, false, null, null, false, error);
     }
 }
