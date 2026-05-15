@@ -354,15 +354,17 @@ internal sealed class RepoSyncCli
             try
             {
                 var result = await AnalyzeRepositoryRemoteUpdatesAsync(repository, dryRun);
+                int progress;
                 lock (gate)
                 {
                     results.Add(result);
                     completed++;
+                    progress = completed;
                 }
 
                 lock (consoleGate)
                 {
-                    Console.WriteLine($"[{completed}/{repositories.Count}] {repository}");
+                    Console.WriteLine($"[{progress}/{repositories.Count}] {repository}");
                     Console.WriteLine($"  {result.ScanMessage}");
                     if (result.HasRemoteUpdates)
                     {
@@ -385,19 +387,11 @@ internal sealed class RepoSyncCli
 
     private async Task<RepositoryScanResult> AnalyzeRepositoryRemoteUpdatesAsync(string repository, bool dryRun)
     {
-        if (dryRun)
-        {
-            return new RepositoryScanResult(
-                repository,
-                false,
-                new List<BranchState>(),
-                "DRY RUN: would fetch remote refs and inspect tracking state");
-        }
-
         var fetchResult = await RunGitAsync(repository, "fetch --all --prune", printOutput: false);
         if (fetchResult.ExitCode != 0)
         {
-            return new RepositoryScanResult(repository, false, new List<BranchState>(), "fetch failed");
+            var message = dryRun ? "DRY RUN: fetch failed" : "fetch failed";
+            return new RepositoryScanResult(repository, false, new List<BranchState>(), message);
         }
 
         var branchState = await GetBranchStatesAsync(repository);
@@ -407,10 +401,12 @@ internal sealed class RepoSyncCli
 
         if (remoteChanged.Count == 0)
         {
-            return new RepositoryScanResult(repository, false, remoteChanged, "no remote updates");
+            var message = dryRun ? "DRY RUN: no remote updates" : "no remote updates";
+            return new RepositoryScanResult(repository, false, remoteChanged, message);
         }
 
-        return new RepositoryScanResult(repository, true, remoteChanged, "remote updates found");
+        var foundMessage = dryRun ? "DRY RUN: remote updates found" : "remote updates found";
+        return new RepositoryScanResult(repository, true, remoteChanged, foundMessage);
     }
 
     private async Task<SyncRepositoryResult> SyncAllBranchesInRepositoryAsync(string repositoryPath, bool dryRun)

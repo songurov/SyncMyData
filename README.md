@@ -120,6 +120,10 @@ Note: `sync` runs in two steps:
 - Step 1: scan and show remote updates
 - Step 2: sync all branches for changed repositories
 
+`--dry-run` behavior:
+- performs real remote scan (fetch + tracking analysis)
+- does not run branch checkout/pull operations
+
 ### Sync only one project
 
 ```bash
