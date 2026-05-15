@@ -201,10 +201,18 @@ internal sealed class RepoSyncCli
         var scriptPath = Path.Combine(localBin, aliasName);
         var dllPath = GetDllPathForAlias();
         var script = BuildAliasScript(dllPath, rootFolder);
-        await File.WriteAllTextAsync(scriptPath, script, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
 
-        await RunProcessAsync("chmod", $"+x {EscapeShellArg(scriptPath)}");
-        EnsurePathEntryInZshRc(home);
+        try
+        {
+            await File.WriteAllTextAsync(scriptPath, script, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            await RunProcessAsync("chmod", $"+x {scriptPath}");
+            EnsurePathEntryInZshRc(home);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or InvalidOperationException)
+        {
+            Console.Error.WriteLine($"Failed to create alias: {ex.Message}");
+            return 2;
+        }
 
         Console.WriteLine();
         Console.WriteLine($"Alias command created: {scriptPath}");
@@ -727,7 +735,15 @@ internal sealed class RepoSyncCli
         };
 
         process.Start();
+        var stdout = await process.StandardOutput.ReadToEndAsync();
+        var stderr = await process.StandardError.ReadToEndAsync();
         await process.WaitForExitAsync();
+
+        if (process.ExitCode != 0)
+        {
+            var message = string.IsNullOrWhiteSpace(stderr) ? stdout : stderr;
+            throw new InvalidOperationException($"{fileName} failed with exit code {process.ExitCode}: {message}".Trim());
+        }
     }
 
     private static void EnsurePathEntryInZshRc(string home)
