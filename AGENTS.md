@@ -16,3 +16,9 @@
 1. All implementation work must be based strictly on tasks defined in the project spec.
 2. Do not start new features, refactors, or fixes unless they are mapped to an explicit spec task.
 3. If a request is outside the current spec tasks, first update/specify the task in the spec, then implement.
+
+## Testing and Output Validation Rules
+
+1. Every change must be tested before it is considered complete.
+2. For every modified command/feature, validate that runtime output matches the expected behavior.
+3. Do not finalize or commit changes until output verification confirms correctness.
