@@ -37,52 +37,52 @@ internal sealed class RepoSyncCli
 
         var repositories = FindGitRepositories(options.RootDirectory).ToList();
         Console.WriteLine($"Found {repositories.Count} repositories in {options.RootDirectory}");
-
-        var failures = new List<string>();
-        foreach (var repository in repositories)
+        if (repositories.Count == 0)
         {
-            Console.WriteLine();
-            Console.WriteLine($"[{repository}]");
-            var branchInfo = await GetCurrentBranchInfoAsync(repository);
-            if (!branchInfo.IsValid)
-            {
-                Console.WriteLine("  current branch: unknown");
-            }
-            else
-            {
-                Console.WriteLine($"  current branch: {branchInfo.Branch}");
-                Console.WriteLine($"  upstream: {branchInfo.Upstream}");
-            }
+            return 0;
+        }
 
-            if (options.DryRun)
-            {
-                Console.WriteLine("  DRY RUN: git fetch --all --prune");
-                if (branchInfo.IsValid)
-                {
-                    Console.WriteLine($"  DRY RUN: git pull --ff-only ({branchInfo.Branch} <- {branchInfo.Upstream})");
-                }
-                else
-                {
-                    Console.WriteLine("  DRY RUN: git pull --ff-only");
-                }
-                continue;
-            }
+        Console.WriteLine();
+        Console.WriteLine("Step 1/2: scanning remote updates...");
 
-            var fetchResult = await RunGitAsync(repository, "fetch --all --prune", printOutput: true);
-            if (fetchResult.ExitCode != 0)
-            {
-                failures.Add($"{repository} (fetch failed)");
-                continue;
-            }
+        var scanResults = await ScanRepositoriesForRemoteUpdatesAsync(repositories, options.DryRun);
+        var changedRepositories = scanResults.Where(x => x.HasRemoteUpdates).ToList();
 
-            var pullResult = await RunGitAsync(repository, "pull --ff-only", printOutput: true);
-            if (pullResult.ExitCode != 0)
+        Console.WriteLine();
+        Console.WriteLine($"Repositories with remote updates: {changedRepositories.Count}");
+        foreach (var result in changedRepositories)
+        {
+            Console.WriteLine($"  - {result.RepositoryPath}");
+            foreach (var branch in result.RemoteUpdatedBranches)
             {
-                failures.Add($"{repository} (pull failed)");
+                Console.WriteLine($"    {branch.Name} ({branch.TrackShort})");
             }
         }
 
-        return PrintSummary(failures, "Sync completed successfully.", "Sync completed with failures:");
+        if (changedRepositories.Count == 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("No remote updates found.");
+            return 0;
+        }
+
+        var failures = new List<string>();
+        Console.WriteLine();
+        Console.WriteLine("Step 2/2: syncing all branches per changed repository...");
+
+        foreach (var result in changedRepositories)
+        {
+            var repository = result.RepositoryPath;
+            Console.WriteLine();
+            Console.WriteLine($"[{repository}]");
+            var syncResult = await SyncAllBranchesInRepositoryAsync(repository, options.DryRun);
+            if (!syncResult.Success)
+            {
+                failures.Add($"{repository} ({syncResult.Error})");
+            }
+        }
+
+        return PrintSummary(failures, "Full sync completed successfully.", "Full sync completed with failures:");
     }
 
     private async Task<int> RunScanAsync(string[] args)
@@ -96,51 +96,23 @@ internal sealed class RepoSyncCli
 
         var repositories = FindGitRepositories(options.RootDirectory).ToList();
         Console.WriteLine($"Found {repositories.Count} repositories in {options.RootDirectory}");
-
-        var changedRepositories = new List<string>();
-        foreach (var repository in repositories)
+        if (repositories.Count == 0)
         {
-            Console.WriteLine();
-            Console.WriteLine($"[{repository}]");
-
-            if (options.DryRun)
-            {
-                Console.WriteLine("  DRY RUN: git fetch --all --prune");
-                Console.WriteLine("  DRY RUN: inspect tracking state for all local branches");
-                continue;
-            }
-
-            var fetchResult = await RunGitAsync(repository, "fetch --all --prune", printOutput: false);
-            if (fetchResult.ExitCode != 0)
-            {
-                Console.WriteLine("  fetch failed");
-                continue;
-            }
-
-            var branchState = await GetBranchStatesAsync(repository);
-            var remoteChanged = branchState
-                .Where(x => x.HasUpstream && (x.TrackShort.Contains('<') || x.TrackShort.Contains("<>")))
-                .ToList();
-
-            if (remoteChanged.Count == 0)
-            {
-                Console.WriteLine("  no remote updates");
-                continue;
-            }
-
-            changedRepositories.Add(repository);
-            Console.WriteLine("  remote updates found:");
-            foreach (var branch in remoteChanged)
-            {
-                Console.WriteLine($"  - {branch.Name} ({branch.TrackShort})");
-            }
+            return 0;
         }
+
+        var scanResults = await ScanRepositoriesForRemoteUpdatesAsync(repositories, options.DryRun);
+        var changedRepositories = scanResults.Where(x => x.HasRemoteUpdates).ToList();
 
         Console.WriteLine();
         Console.WriteLine($"Repositories with remote updates: {changedRepositories.Count}");
-        foreach (var repository in changedRepositories)
+        foreach (var result in changedRepositories)
         {
-            Console.WriteLine($"  - {repository}");
+            Console.WriteLine($"  - {result.RepositoryPath}");
+            foreach (var branch in result.RemoteUpdatedBranches)
+            {
+                Console.WriteLine($"    {branch.Name} ({branch.TrackShort})");
+            }
         }
 
         return 0;
@@ -292,6 +264,145 @@ internal sealed class RepoSyncCli
             .ToList();
     }
 
+    private async Task<List<RepositoryScanResult>> ScanRepositoriesForRemoteUpdatesAsync(List<string> repositories, bool dryRun)
+    {
+        var results = new List<RepositoryScanResult>();
+        var gate = new object();
+        var consoleGate = new object();
+        var maxParallel = Math.Min(Environment.ProcessorCount, 8);
+        var semaphore = new SemaphoreSlim(maxParallel);
+        var completed = 0;
+
+        var tasks = repositories.Select(async repository =>
+        {
+            await semaphore.WaitAsync();
+            try
+            {
+                var result = await AnalyzeRepositoryRemoteUpdatesAsync(repository, dryRun);
+                lock (gate)
+                {
+                    results.Add(result);
+                    completed++;
+                }
+
+                lock (consoleGate)
+                {
+                    Console.WriteLine($"[{completed}/{repositories.Count}] {repository}");
+                    Console.WriteLine($"  {result.ScanMessage}");
+                    if (result.HasRemoteUpdates)
+                    {
+                        foreach (var branch in result.RemoteUpdatedBranches)
+                        {
+                            Console.WriteLine($"  - {branch.Name} ({branch.TrackShort})");
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                semaphore.Release();
+            }
+        });
+
+        await Task.WhenAll(tasks);
+        return results.OrderBy(x => x.RepositoryPath, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private async Task<RepositoryScanResult> AnalyzeRepositoryRemoteUpdatesAsync(string repository, bool dryRun)
+    {
+        if (dryRun)
+        {
+            return new RepositoryScanResult(
+                repository,
+                false,
+                new List<BranchState>(),
+                "DRY RUN: would fetch remote refs and inspect tracking state");
+        }
+
+        var fetchResult = await RunGitAsync(repository, "fetch --all --prune", printOutput: false);
+        if (fetchResult.ExitCode != 0)
+        {
+            return new RepositoryScanResult(repository, false, new List<BranchState>(), "fetch failed");
+        }
+
+        var branchState = await GetBranchStatesAsync(repository);
+        var remoteChanged = branchState
+            .Where(x => x.HasUpstream && (x.TrackShort.Contains('<') || x.TrackShort.Contains("<>")))
+            .ToList();
+
+        if (remoteChanged.Count == 0)
+        {
+            return new RepositoryScanResult(repository, false, remoteChanged, "no remote updates");
+        }
+
+        return new RepositoryScanResult(repository, true, remoteChanged, "remote updates found");
+    }
+
+    private async Task<SyncRepositoryResult> SyncAllBranchesInRepositoryAsync(string repositoryPath, bool dryRun)
+    {
+        var statusResult = await RunGitAsync(repositoryPath, "status --porcelain", printOutput: false);
+        if (statusResult.ExitCode != 0)
+        {
+            return SyncRepositoryResult.Fail("cannot read status");
+        }
+
+        if (!string.IsNullOrWhiteSpace(statusResult.Output))
+        {
+            return SyncRepositoryResult.Fail("has local changes, skipped");
+        }
+
+        var originalBranchResult = await RunGitAsync(repositoryPath, "rev-parse --abbrev-ref HEAD", printOutput: false);
+        if (originalBranchResult.ExitCode != 0 || string.IsNullOrWhiteSpace(originalBranchResult.Output))
+        {
+            return SyncRepositoryResult.Fail("cannot determine current branch");
+        }
+
+        var originalBranch = originalBranchResult.Output.Trim();
+        var branchStates = await GetBranchStatesAsync(repositoryPath);
+        var branches = branchStates.Where(x => x.HasUpstream).Select(x => x.Name).ToList();
+        if (branches.Count == 0)
+        {
+            Console.WriteLine("  no local branches with upstream");
+            return SyncRepositoryResult.Ok();
+        }
+
+        Console.WriteLine($"  branches to sync: {branches.Count}");
+        foreach (var branch in branches)
+        {
+            Console.WriteLine($"  [{branch}]");
+            if (dryRun)
+            {
+                Console.WriteLine($"    DRY RUN: git checkout {branch}");
+                Console.WriteLine("    DRY RUN: git pull --ff-only");
+                continue;
+            }
+
+            var checkoutResult = await RunGitAsync(repositoryPath, $"checkout {EscapeGitArg(branch)}", printOutput: true);
+            if (checkoutResult.ExitCode != 0)
+            {
+                return SyncRepositoryResult.Fail($"checkout failed on branch {branch}");
+            }
+
+            var pullResult = await RunGitAsync(repositoryPath, "pull --ff-only", printOutput: true);
+            if (pullResult.ExitCode != 0)
+            {
+                return SyncRepositoryResult.Fail($"pull failed on branch {branch}");
+            }
+        }
+
+        if (!dryRun)
+        {
+            Console.WriteLine($"  restoring branch: {originalBranch}");
+            var restoreResult = await RunGitAsync(repositoryPath, $"checkout {EscapeGitArg(originalBranch)}", printOutput: true);
+            if (restoreResult.ExitCode != 0)
+            {
+                return SyncRepositoryResult.Fail("failed to restore original branch");
+            }
+        }
+
+        return SyncRepositoryResult.Ok();
+    }
+
     private static async Task<CurrentBranchInfo> GetCurrentBranchInfoAsync(string repositoryPath)
     {
         var branchResult = await RunGitAsync(repositoryPath, "rev-parse --abbrev-ref HEAD", printOutput: false);
@@ -347,7 +458,7 @@ internal sealed class RepoSyncCli
         Console.WriteLine("SyncMyData CLI");
         Console.WriteLine();
         Console.WriteLine("Usage:");
-        Console.WriteLine("  sync [--root <path>] [--dry-run]");
+        Console.WriteLine("  sync [--root <path>] [--dry-run]  (scan remote updates, then sync all branches in changed repos)");
         Console.WriteLine("  scan [--root <path>] [--dry-run]");
         Console.WriteLine("  sync-project --repo <path> [--dry-run]");
         Console.WriteLine("  sync-branches --repo <path> [--dry-run]");
@@ -545,5 +656,17 @@ internal sealed class RepoSyncCli
 
         public static CurrentBranchInfo Invalid() =>
             new(string.Empty, string.Empty, false);
+    }
+
+    private readonly record struct RepositoryScanResult(
+        string RepositoryPath,
+        bool HasRemoteUpdates,
+        List<BranchState> RemoteUpdatedBranches,
+        string ScanMessage);
+
+    private readonly record struct SyncRepositoryResult(bool Success, string Error)
+    {
+        public static SyncRepositoryResult Ok() => new(true, string.Empty);
+        public static SyncRepositoryResult Fail(string error) => new(false, error);
     }
 }

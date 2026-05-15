@@ -22,10 +22,12 @@ Current features:
 
 1. Recursively scans a root folder.
 2. Finds all directories that contain `.git`.
-3. Runs the following commands for each repository:
-   - `git fetch --all --prune`
+3. Scans remote updates for each repository (`git fetch --all --prune` + tracking state check).
+4. Displays exactly which repositories and branches are behind/diverged from remote.
+5. For each changed repository, syncs all local branches with upstream:
+   - `git checkout <branch>`
    - `git pull --ff-only`
-4. Prints status and any errors per repository.
+6. Restores the original branch after repository sync.
 
 ### `sync-branches`
 
@@ -92,6 +94,10 @@ If you do not pass `--root`, the tool automatically uses the current user's home
 ```bash
 dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- sync
 ```
+
+Note: `sync` runs in two steps:
+- Step 1: scan and show remote updates
+- Step 2: sync all branches for changed repositories
 
 ### Sync only one project
 
