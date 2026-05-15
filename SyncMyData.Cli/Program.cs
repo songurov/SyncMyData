@@ -20,6 +20,7 @@ internal sealed class RepoSyncCli
         {
             "sync" => await RunSyncAsync(commandArgs),
             "scan" => await RunScanAsync(commandArgs),
+            "sync-project" => await RunSyncProjectAsync(commandArgs),
             "sync-branches" => await RunSyncBranchesAsync(commandArgs),
             _ => UnknownCommand(command)
         };
@@ -125,6 +126,42 @@ internal sealed class RepoSyncCli
             Console.WriteLine($"  - {repository}");
         }
 
+        return 0;
+    }
+
+    private async Task<int> RunSyncProjectAsync(string[] args)
+    {
+        var options = ParseSyncBranchesOptions(args);
+        if (!options.IsValid)
+        {
+            Console.Error.WriteLine(options.Error);
+            return 1;
+        }
+
+        Console.WriteLine($"Repository: {options.RepositoryPath}");
+
+        if (options.DryRun)
+        {
+            Console.WriteLine("  DRY RUN: git fetch --all --prune");
+            Console.WriteLine("  DRY RUN: git pull --ff-only");
+            return 0;
+        }
+
+        var fetchResult = await RunGitAsync(options.RepositoryPath, "fetch --all --prune", printOutput: true);
+        if (fetchResult.ExitCode != 0)
+        {
+            Console.Error.WriteLine("Project sync failed: fetch error.");
+            return 2;
+        }
+
+        var pullResult = await RunGitAsync(options.RepositoryPath, "pull --ff-only", printOutput: true);
+        if (pullResult.ExitCode != 0)
+        {
+            Console.Error.WriteLine("Project sync failed: pull error.");
+            return 2;
+        }
+
+        Console.WriteLine("Project sync completed successfully.");
         return 0;
     }
 
@@ -273,11 +310,13 @@ internal sealed class RepoSyncCli
         Console.WriteLine("Usage:");
         Console.WriteLine("  sync [--root <path>] [--dry-run]");
         Console.WriteLine("  scan [--root <path>] [--dry-run]");
+        Console.WriteLine("  sync-project --repo <path> [--dry-run]");
         Console.WriteLine("  sync-branches --repo <path> [--dry-run]");
         Console.WriteLine();
         Console.WriteLine("Commands:");
         Console.WriteLine("  sync           fetch + pull current branch in all repositories");
         Console.WriteLine("  scan           find repositories that have remote updates on tracked branches");
+        Console.WriteLine("  sync-project   fetch + pull current branch in one repository");
         Console.WriteLine("  sync-branches  fetch + pull all local branches with upstream in one repository");
     }
 

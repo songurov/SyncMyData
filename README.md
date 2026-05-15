@@ -5,6 +5,7 @@ A C# CLI for automating local workflows.
 Current features:
 - scan all repositories and detect remote updates
 - sync current branch in all repositories
+- sync current branch in a single repository
 - sync all local branches with upstream in one repository
 
 ## How It Works
@@ -92,6 +93,12 @@ If you do not pass `--root`, the tool automatically uses the current user's home
 dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- sync
 ```
 
+### Sync only one project
+
+```bash
+dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- sync-project --repo /Users/<username>/Code/my-repo
+```
+
 ### Sync all branches in one repository
 
 ```bash
@@ -116,7 +123,7 @@ Then run:
 
 - `--root <path>`: root folder where scanning starts
 - `--dry-run`: shows what would run without executing commands
-- `--repo <path>`: target repository for `sync-branches`
+- `--repo <path>`: target repository for `sync-project` or `sync-branches`
 
 ## Current Limitations
 
