@@ -110,6 +110,7 @@ dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- analyze-branches --
 dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- analyze-branches --repo /Users/<username>/Code/my-repo --merged
 dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- analyze-branches --repo /Users/<username>/Code/my-repo --cleanup-candidates
 dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- analyze-branches --repo /Users/<username>/Code/my-repo --author fiodor
+dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- analyze-branches --repo /Users/<username>/Code/my-repo --match songurov
 dotnet run --project SyncMyData.Cli/SyncMyData.Cli.csproj -- analyze-branches --repo /Users/<username>/Code/my-repo --older-than 60
 ```
 

@@ -671,6 +671,13 @@ internal sealed class RepoSyncCli
             query = query.Where(x => x.LastAuthor.Contains(options.AuthorFilter!, StringComparison.OrdinalIgnoreCase));
         }
 
+        if (!string.IsNullOrWhiteSpace(options.MatchFilter))
+        {
+            query = query.Where(x =>
+                x.Branch.Contains(options.MatchFilter!, StringComparison.OrdinalIgnoreCase) ||
+                x.LastAuthor.Contains(options.MatchFilter!, StringComparison.OrdinalIgnoreCase));
+        }
+
         if (options.OlderThanDays is int olderThan)
         {
             query = query.Where(x => x.AgeDays is int age && age > olderThan);
@@ -1007,7 +1014,7 @@ internal sealed class RepoSyncCli
         Console.WriteLine("Usage:");
         Console.WriteLine("  sync [--root <path>] [--dry-run]  (scan remote updates, then sync all branches in changed repos)");
         Console.WriteLine("  scan [--root <path>] [--dry-run]");
-        Console.WriteLine("  analyze-branches (--repo <path> | --root <path>) [--dry-run] [--state <value>] [--merged] [--cleanup-candidates] [--author <name>] [--older-than <days>]");
+        Console.WriteLine("  analyze-branches (--repo <path> | --root <path>) [--dry-run] [--state <value>] [--merged] [--cleanup-candidates] [--author <name>] [--match <text>] [--older-than <days>]");
         Console.WriteLine("  sync-project --repo <path> [--dry-run]");
         Console.WriteLine("  sync-branches --repo <path> [--dry-run]");
         Console.WriteLine("  setup-alias");
@@ -1113,6 +1120,7 @@ internal sealed class RepoSyncCli
         var mergedOnly = false;
         var cleanupCandidatesOnly = false;
         string? authorFilter = null;
+        string? matchFilter = null;
         int? olderThanDays = null;
 
         for (var i = 0; i < args.Length; i++)
@@ -1144,6 +1152,10 @@ internal sealed class RepoSyncCli
                     if (i + 1 >= args.Length) return AnalyzeOptions.Invalid("Missing value for --author");
                     authorFilter = args[++i];
                     break;
+                case "--match":
+                    if (i + 1 >= args.Length) return AnalyzeOptions.Invalid("Missing value for --match");
+                    matchFilter = args[++i];
+                    break;
                 case "--older-than":
                     if (i + 1 >= args.Length) return AnalyzeOptions.Invalid("Missing value for --older-than");
                     if (!int.TryParse(args[++i], out var parsedDays) || parsedDays < 0)
@@ -1161,7 +1173,7 @@ internal sealed class RepoSyncCli
         {
             if (!Directory.Exists(repositoryPath)) return AnalyzeOptions.Invalid($"Repository path does not exist: {repositoryPath}");
             if (!Directory.Exists(Path.Combine(repositoryPath, ".git"))) return AnalyzeOptions.Invalid($"Path is not a Git repository: {repositoryPath}");
-            return AnalyzeOptions.Valid(rootDirectory, repositoryPath, dryRun, stateFilter, mergedOnly, cleanupCandidatesOnly, authorFilter, olderThanDays);
+            return AnalyzeOptions.Valid(rootDirectory, repositoryPath, dryRun, stateFilter, mergedOnly, cleanupCandidatesOnly, authorFilter, matchFilter, olderThanDays);
         }
 
         if (!Directory.Exists(rootDirectory))
@@ -1169,7 +1181,7 @@ internal sealed class RepoSyncCli
             return AnalyzeOptions.Invalid($"Root path does not exist: {rootDirectory}");
         }
 
-        return AnalyzeOptions.Valid(rootDirectory, null, dryRun, stateFilter, mergedOnly, cleanupCandidatesOnly, authorFilter, olderThanDays);
+        return AnalyzeOptions.Valid(rootDirectory, null, dryRun, stateFilter, mergedOnly, cleanupCandidatesOnly, authorFilter, matchFilter, olderThanDays);
     }
 
     private static IEnumerable<string> FindGitRepositories(string rootDirectory)
@@ -1397,6 +1409,7 @@ internal sealed class RepoSyncCli
         bool MergedOnly,
         bool CleanupCandidatesOnly,
         string? AuthorFilter,
+        string? MatchFilter,
         int? OlderThanDays,
         bool IsValid,
         string Error)
@@ -1409,10 +1422,11 @@ internal sealed class RepoSyncCli
             bool mergedOnly,
             bool cleanupCandidatesOnly,
             string? authorFilter,
+            string? matchFilter,
             int? olderThanDays) =>
-            new(rootDirectory, repositoryPath, dryRun, stateFilter, mergedOnly, cleanupCandidatesOnly, authorFilter, olderThanDays, true, string.Empty);
+            new(rootDirectory, repositoryPath, dryRun, stateFilter, mergedOnly, cleanupCandidatesOnly, authorFilter, matchFilter, olderThanDays, true, string.Empty);
 
         public static AnalyzeOptions Invalid(string error) =>
-            new(string.Empty, null, false, null, false, false, null, null, false, error);
+            new(string.Empty, null, false, null, false, false, null, null, null, false, error);
     }
 }
