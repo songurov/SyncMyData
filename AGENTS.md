@@ -10,3 +10,9 @@
    - `Add scan command for remote branch updates`
    - `Fix sync-branches checkout flow and restore original branch`
    - `Update README with scan and sync-branches usage`
+
+## Execution Scope Rules
+
+1. All implementation work must be based strictly on tasks defined in the project spec.
+2. Do not start new features, refactors, or fixes unless they are mapped to an explicit spec task.
+3. If a request is outside the current spec tasks, first update/specify the task in the spec, then implement.
